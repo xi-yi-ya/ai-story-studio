@@ -53,9 +53,13 @@ class Project:
                 if item['id']==ident: return item
         raise ValueError('素材或分镜不存在')
 
-    def delete(self,ident):
+    def delete(self,ident,detach=False):
         affected=[s['name'] for s in self.data['shots'] if ident in s['materials']]
-        if affected: raise ValueError('仍被分镜引用，请先解除引用：'+', '.join(affected))
+        if affected and not detach: raise ValueError('仍被分镜引用，请先解除引用：'+', '.join(affected))
+        if detach:
+            for shot in self.data['shots']:
+                if ident in shot['materials']:
+                    shot['materials'].remove(ident);shot['needs_review']=True
         for kind in ('characters','scenes','shots'):
             self.data[kind]=[x for x in self.data[kind] if x['id']!=ident]
         # Files and generation history retained for recoverability.

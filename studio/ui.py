@@ -3,7 +3,7 @@ from dataclasses import asdict
 from pathlib import Path
 import keyring
 from PySide6.QtCore import Qt,QThread,Signal,QUrl,QSettings
-from PySide6.QtGui import QPixmap,QDesktopServices,QAction
+from PySide6.QtGui import QPixmap,QDesktopServices,QAction,QIcon
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QPushButton,QLabel,QLineEdit,QTextEdit,QPlainTextEdit,QTabWidget,QScrollArea,QGroupBox,QDialog,QFormLayout,QComboBox,QDoubleSpinBox,QSpinBox,QCheckBox,QDialogButtonBox,QFileDialog,QMessageBox,QInputDialog,QMenu,QDockWidget,QListWidget,QListWidgetItem,QAbstractItemView)
 from PySide6.QtMultimedia import QMediaPlayer,QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -11,6 +11,8 @@ from .storage import Project,uid,now
 from .workflows import Generation,MODES,RATIOS,STYLES,resolution,frames
 from .comfy import Comfy,execute
 from .deepseek import chat,validate_action
+from .media import video_poster
+from . import __version__
 
 def button(text,fn):
     b=QPushButton(text); b.clicked.connect(fn);return b
@@ -94,7 +96,7 @@ class GenerationDialog(QDialog):
 class Studio(QMainWindow):
     def __init__(self,project_path=None):
         super().__init__();self.settings=QSettings('XiYi','AIStoryStudio');self.project=None;self.active=None;self.chat_worker=None;self.context_ids=[]
-        self.setWindowTitle('AI Story Studio · v0.1.0');self.resize(1440,920)
+        self.setWindowTitle('AI Story Studio · v'+__version__);self.resize(1440,920)
         self.tabs=QTabWidget();self.setCentralWidget(self.tabs)
         toolbar=self.addToolBar('项目')
         for title,fn in [('新建项目',self.new_project),('打开项目',self.open_project),('保存',self.save),('设置',self.configure),('任务记录',self.show_jobs),('AI 对话',self.toggle_chat)]:
@@ -103,7 +105,9 @@ class Studio(QMainWindow):
         chatbox=QWidget();cl=QVBoxLayout(chatbox);self.transcript=QTextEdit();self.transcript.setReadOnly(True);cl.addWidget(self.transcript)
         self.context_label=QLabel('右击素材卡可发送给 AI');self.context_label.setWordWrap(True);cl.addWidget(self.context_label)
         self.input=QPlainTextEdit();self.input.setMaximumHeight(120);self.input.setPlaceholderText('描述故事或修改目标……');cl.addWidget(self.input)
-        self.send=button('发送',self.send_chat);cl.addWidget(self.send);self.dock.setWidget(chatbox);self.addDockWidget(Qt.RightDockWidgetArea,self.dock)
+        self.send=button('发送',self.send_chat);cl.addWidget(self.send)
+        cl.addWidget(button('导入子 agent 建议（临时测试）',self.import_agent))
+        self.dock.setWidget(chatbox);self.addDockWidget(Qt.RightDockWidgetArea,self.dock)
         if project_path:self.load_project(project_path)
         else:self.refresh()
     def busy(self):return bool(self.active or self.chat_worker)
@@ -140,7 +144,7 @@ class Studio(QMainWindow):
             old=self.tabs.widget(0);self.tabs.removeTab(0);old.deleteLater()
         if not self.project:
             self.tabs.addTab(QLabel('请新建或打开一个本地项目。素材、生成记录和对话均保存在项目文件夹中。'),'开始');return
-        self.setWindowTitle(f'AI Story Studio · {self.project.data["title"]} · v0.1.0')
+        self.setWindowTitle(f'AI Story Studio · {self.project.data["title"]} · v{__version__}')
         for kind,label in [('characters','角色'),('scenes','场景'),('shots','分镜板')]:
             container=QWidget();layout=QVBoxLayout(container)
             if kind=='shots':
@@ -173,11 +177,19 @@ class Studio(QMainWindow):
                 dl.addWidget(button('已检查，保留当前结果',lambda:self.clear_review(item)))
             dl.addWidget(button('关联角色 / 场景',lambda:self.link_materials(item)))
         dl.addWidget(button('编辑描述',lambda:self.edit_item(kind,item)));layout.addWidget(details)
+        dl.addWidget(button('生成历史',lambda:self.versions(item)))
+        dl.addWidget(button('删除'+{'characters':'角色','scenes':'场景','shots':'分镜'}[kind],lambda:self.delete(item)))
         imagebox=QWidget();il=QVBoxLayout(imagebox);il.addWidget(self.thumbnail(item['image'],'分镜图' if kind=='shots' else '参考图'))
         il.addWidget(button('生成 / 编辑图片',lambda:self.generate(item,'qwen')));il.addWidget(button('导入图片',lambda:self.import_image(item)))
         layout.addWidget(imagebox)
         if kind=='shots':
-            vb=QWidget();vl=QVBoxLayout(vb);vl.addWidget(QLabel('视频已生成' if item['video'] else '待生成视频'))
+            vb=QWidget();vl=QVBoxLayout(vb)
+            poster=''
+            if item['video']:
+                try:poster=video_poster(self.project,item['video'])
+                except Exception:pass
+            vl.addWidget(self.thumbnail(poster,'首帧读取失败' if item['video'] else '待生成视频'))
+            if item['video']:vl.addWidget(QLabel('视频首帧预览'))
             vl.addWidget(button('生成视频',lambda:self.generate(item,'h3_i2v')))
             if item['video']:vl.addWidget(button('播放视频',lambda:self.play(item['video'])))
             vl.addWidget(button('版本记录',lambda:self.versions(item)));layout.addWidget(vb)
@@ -187,8 +199,16 @@ class Studio(QMainWindow):
         for name,fn in [('发送给 AI',lambda:self.add_context(item)),('版本记录',lambda:self.versions(item)),('高清放大',lambda:self.generate(item,'upscale')),('删除条目',lambda:self.delete(item))]:m.addAction(name,fn)
         m.exec(box.mapToGlobal(pos))
     def delete(self,item):
-        if QMessageBox.question(self,'删除条目','删除条目？素材文件和历史输出仍保留。')!=QMessageBox.Yes:return
-        try:self.project.delete(item['id']);self.refresh()
+        if any(j['target']==item['id'] and j['status'] in ('new','submitting','queued','running') for j in self.project.data['jobs']):
+            message(self,'此条目仍有生成任务，请先完成或取消任务。');return
+        affected=[s['name'] for s in self.project.data['shots'] if item['id'] in s['materials']]
+        text='删除“'+item['name']+'”？素材文件和历史输出仍保留。'
+        if affected:text+='\n同时解除以下分镜的素材引用，已有图片和视频保留：'+', '.join(affected)
+        if QMessageBox.question(self,'删除条目',text)!=QMessageBox.Yes:return
+        try:
+            self.project.delete(item['id'],detach=True)
+            self.context_ids=[i for i in self.context_ids if i!=item['id']]
+            self.context_label.setText('右击素材卡可发送给 AI');self.refresh()
         except Exception as e:message(self,e)
     def clear_review(self,item):item['needs_review']=False;self.save();self.refresh()
     def edit_item(self,kind,item=None):
@@ -211,9 +231,28 @@ class Studio(QMainWindow):
         bb=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel);bb.accepted.connect(d.accept);bb.rejected.connect(d.reject);v.addWidget(bb)
         if d.exec():item['materials']=[i for i,c in checks if c.isChecked()];self.save();self.refresh()
     def versions(self,item):
-        d=QDialog(self);d.setWindowTitle('版本 · 选定后恢复为当前结果');d.resize(700,400);v=QVBoxLayout(d);ls=QListWidget();v.addWidget(ls)
-        for x in item['versions']:ls.addItem(x['time'][:19]+' · '+x['kind']+' · '+x.get('intent','')[:90])
+        d=QDialog(self);d.setWindowTitle(item['name']+' · 生成历史');d.resize(820,650);v=QVBoxLayout(d);ls=QListWidget();v.addWidget(ls)
+        detail=QPlainTextEdit();detail.setReadOnly(True);v.addWidget(detail)
+        for x in item['versions']:
+            row=QListWidgetItem(x['time'][:19]+' · '+x['kind']+' · '+x.get('intent','')[:90])
+            try:
+                path=video_poster(self.project,x['file']) if x['kind']=='video' else x['file']
+                row.setIcon(QIcon(str(self.project.file(path))))
+            except Exception:pass
+            ls.addItem(row)
+        if not item['versions']:v.addWidget(QLabel('还没有生成结果；生成成功后会自动保存到这里。'))
         def selected():return item['versions'][ls.currentRow()] if ls.currentRow()>=0 else None
+        def details():
+            x=selected()
+            if x:
+                job=next((j for j in self.project.data['jobs'] if j['id']==x.get('job')),None)
+                detail.setPlainText(json.dumps({'version':x,'generation':job.get('generation') if job else None},ensure_ascii=False,indent=2))
+        ls.currentRowChanged.connect(details)
+        if ls.count():ls.setCurrentRow(ls.count()-1)
+        pending=[j for j in self.project.data['jobs'] if j['target']==item['id'] and j['status']!='completed']
+        if pending:
+            v.addWidget(QLabel('其他生成记录（未产生可用版本）'))
+            records=QPlainTextEdit('\n'.join(j.get('created','')[:19]+' · '+j['generation']['mode']+' · '+j['status']+' · '+j.get('error','')[:200] for j in pending));records.setReadOnly(True);records.setMaximumHeight(100);v.addWidget(records)
         def preview():
             x=selected()
             if x:QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.project.file(x['file']))))
@@ -233,6 +272,8 @@ class Studio(QMainWindow):
         if d.exec():
             j={'id':uid(),'target':item['id'],'generation':asdict(d.g),'materials':copy.deepcopy([self.project.get(i) for i in item['materials']]),'status':'new','created':now()}
             self.project.data['jobs'].append(j);self.save();self.start_next()
+            return j
+        return None
     def start_next(self):
         if self.active:return
         j=next((j for j in self.project.data['jobs'] if j['status']=='new'),None)
@@ -315,6 +356,19 @@ class Studio(QMainWindow):
                 except Exception as e:result='操作失败：'+str(e);message(self,e)
             self.project.data['chat'].append({'role':'tool','tool_call_id':call['id'],'content':result})
         self.save();self.refresh()
+    def import_agent(self):
+        if not self.project or self.chat_worker:return
+        path,_=QFileDialog.getOpenFileName(self,'导入子 agent 建议','','建议 (*.json)')
+        if not path:return
+        try:
+            bundle=json.loads(Path(path).read_text(encoding='utf-8'))
+            if bundle.get('project_id')!=self.project.data['id']:raise ValueError('建议属于其他项目，请在对应项目中导入。')
+            msg=bundle['message']
+            if msg.get('role')!='assistant':raise ValueError('建议消息格式错误')
+            for call in msg.get('tool_calls',[]):validate_action(call['function']['name'],json.loads(call['function']['arguments']))
+            msg=copy.deepcopy(msg);msg['content']='[临时子 agent：'+str(bundle.get('provider','未知'))+']\n'+(msg.get('content') or '')
+            self.chat_result(msg)
+        except Exception as e:message(self,e)
     def apply_action(self,name,args):
         validate_action(name,args)
         if name=='set_story':self.set_story(args['text']);return '故事已保存'
@@ -326,7 +380,8 @@ class Studio(QMainWindow):
             if 'materials' in args:item['materials']=args['materials']
             self.project.mark_dependents(item['id']);self.save();return '条目已更新'
         if name=='generate':
-            item=self.project.get(args['target']);self.generate(item,args['mode'],Generation(mode=args['mode'],prompt=args['prompt'],references=args['references'],megapixels=.2 if args['mode'].startswith('h3') else 1,seconds=2));return '已打开参数审阅界面；是否提交由用户决定，完成状态见任务记录'
+            item=self.project.get(args['target']);job=self.generate(item,args['mode'],Generation(mode=args['mode'],prompt=args['prompt'],references=args['references'],megapixels=.2 if args['mode'].startswith('h3') else 1,seconds=2))
+            return '已加入队列，任务 '+job['id']+'；尚未完成生成' if job else '用户取消了生成，未提交任务'
     def closeEvent(self,event):
         if self.busy():message(self,'仍有任务运行，请等待完成或在任务记录中取消后关闭。');event.ignore();return
         self.save();event.accept()
