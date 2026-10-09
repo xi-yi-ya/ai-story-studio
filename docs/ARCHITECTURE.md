@@ -4,7 +4,7 @@ GUI（Qt 主线程）负责项目变更和审阅；推理 worker 使用项目快
 
 `workflows.py` 构建 API DAG，依据 `/object_info` 检查节点存在、模型枚举、连接闭合。原编辑器 workflow 中的预览、注释、断开节点不进入 API 图。工作流模型和采样器显式固定，GUI 参数替换有界字段。H3 LoRA 同时接入 guider 和 scheduler，关闭则两者直连底模。
 
-`comfy.py` 使用 HTTP 上传、提交、历史轮询和输出下载。提交响应不是完成；只有 history.completed 才回收 output 节点的媒体。网络异常不自动重新提交。目标后端支持带 prompt_id 的中断；取消只针对所选任务。没有采用 WebSocket，当前进度为排队/运行状态，不显示精确采样百分比。
+`comfy.py` 使用 HTTP 上传、提交、历史轮询和输出下载，WebSocket 接收按 prompt_id 过滤的当前节点步数。提交响应或采样 100% 不是完成；只有 history.completed 后成功回收 output 媒体才登记完成。没有步数时显示忙碌状态，WebSocket 不可用时仍轮询 HTTP，不伪造总进度。网络异常不自动重新提交。目标后端支持带 prompt_id 的中断；取消只针对所选任务。
 
 `storage.py` 项目相对路径、导入副本、原子 JSON 替换、生成历史。条目删除保留媒体文件。路径解析拒绝越出项目。中断恢复以 jobs journal 为准，重复输出注册幂等。
 

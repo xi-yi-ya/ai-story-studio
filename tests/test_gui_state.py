@@ -82,3 +82,28 @@ def test_reference_order_and_text_only_mode_does_not_submit_hidden_refs(tmp_path
     d.accept_valid()
     assert d.result()==QDialog.Accepted and d.g.references==[]
     d.deleteLater()
+
+def test_prompt_roundtrip_and_workflow_switch(tmp_path):
+    p=Project(tmp_path/'p',True);a=p.add('characters','a')
+    p.data['jobs'].append({'id':'j','target':a['id'],'generation':{'mode':'qwen','prompt':'旧项目最后提示词'},'status':'completed'})
+    a['last_prompts']={'qwen_edit':'只修改衣服'};p.save();p=Project(p.root)
+    assert p.last_prompt(a['id'],'qwen')=='旧项目最后提示词'
+    d=GenerationDialog(p,Generation(mode='qwen',prompt=p.last_prompt(a['id'],'qwen')),target=a['id'])
+    d.prompt.setPlainText('本次草稿');d.mode.setCurrentIndex(d.mode.findData('qwen_edit'))
+    assert d.prompt.toPlainText()=='只修改衣服'
+    d.mode.setCurrentIndex(d.mode.findData('qwen'));assert d.prompt.toPlainText()=='本次草稿'
+    d.deleteLater()
+
+def test_fixed_thumbnail_and_task_management(tmp_path):
+    from studio.ui import TaskDialog
+    from dataclasses import asdict
+    p=Project(tmp_path/'p',True);a=p.add('characters','a')
+    p.data['jobs']=[{'id':'j','target':a['id'],'generation':asdict(Generation(prompt='saved')),'status':'new'}];p.save()
+    w=Studio(p.root);thumb=w.thumbnail('','empty')
+    assert thumb.minimumWidth()==thumb.maximumWidth()==240
+    assert thumb.minimumHeight()==thumb.maximumHeight()==240
+    d=TaskDialog(w);assert d.table.rowCount()==1
+    d.cancel();assert w.project.data['jobs'][0]['status']=='cancelled'
+    d.filter.setCurrentIndex(4);assert d.table.rowCount()==1
+    d.pause();assert Project(p.root).data['queue_paused']
+    d.close();thumb.deleteLater();w.close()

@@ -62,6 +62,13 @@ class Project:
                 if item['id']==ident: return item
         raise ValueError('素材或分镜不存在')
 
+    def last_prompt(self,ident,mode):
+        item=self.get(ident)
+        if mode in item.get('last_prompts',{}):return item['last_prompts'][mode]
+        for job in reversed(self.data['jobs']):
+            if job['target']==ident and job['generation']['mode']==mode:return job['generation']['prompt']
+        return ''
+
     def delete(self,ident,detach=False):
         affected=[s['name'] for s in self.data['shots'] if ident in s['materials']]
         if affected and not detach: raise ValueError('仍被分镜引用，请先解除引用：'+', '.join(affected))

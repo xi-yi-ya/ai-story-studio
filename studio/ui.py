@@ -2,12 +2,12 @@ import copy,json,os,sys
 from dataclasses import asdict
 from pathlib import Path
 import keyring
-from PySide6.QtCore import Qt,QThread,Signal,QUrl,QSettings
+from PySide6.QtCore import Qt,QThread,Signal,QUrl,QSettings,QTimer
 from PySide6.QtGui import QPixmap,QDesktopServices,QAction,QIcon
-from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QPushButton,QLabel,QLineEdit,QTextEdit,QPlainTextEdit,QTabWidget,QScrollArea,QGroupBox,QDialog,QFormLayout,QComboBox,QDoubleSpinBox,QSpinBox,QCheckBox,QDialogButtonBox,QFileDialog,QMessageBox,QInputDialog,QMenu,QDockWidget,QListWidget,QListWidgetItem,QAbstractItemView)
+from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QPushButton,QLabel,QLineEdit,QTextEdit,QPlainTextEdit,QTabWidget,QScrollArea,QGroupBox,QDialog,QFormLayout,QComboBox,QDoubleSpinBox,QSpinBox,QCheckBox,QDialogButtonBox,QFileDialog,QMessageBox,QInputDialog,QMenu,QDockWidget,QListWidget,QListWidgetItem,QAbstractItemView,QProgressBar,QTableWidget,QTableWidgetItem,QHeaderView)
 from PySide6.QtMultimedia import QMediaPlayer,QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
-from .storage import Project,uid,now
+from .storage import Project,uid,now,atomic_json
 from .workflows import Generation,MODES,RATIOS,STYLES,resolution,frames
 from .comfy import Comfy,execute
 from .deepseek import chat,validate_action
@@ -28,8 +28,9 @@ class Worker(QThread):
         except Exception as e:self.failed.emit(str(e))
 
 class GenerationDialog(QDialog):
-    def __init__(self,project,g,parent=None):
+    def __init__(self,project,g,parent=None,target=None):
         super().__init__(parent);self.project=project;self.g=g
+        self.target=target;self.prompt_mode=g.mode;self.prompt_drafts={g.mode:g.prompt}
         self.setWindowTitle('生成参数 · 提交前检查');self.resize(640,760)
         outer=QVBoxLayout(self);body=QWidget();form=QFormLayout(body);self.form=form;outer.addWidget(scroll(body))
         self.mode=QComboBox()
@@ -66,6 +67,7 @@ class GenerationDialog(QDialog):
         self.summary=QLabel();self.summary.setWordWrap(True);form.addRow(self.summary)
         for w in (self.mp,self.seconds,self.scale):w.valueChanged.connect(self.preview)
         self.ratio.currentTextChanged.connect(self.preview);self.mode.currentIndexChanged.connect(self.preview)
+        self.mode.currentIndexChanged.connect(self.restore_prompt)
         self.cinema.toggled.connect(self.preview)
         self.preview()
         buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel);buttons.button(QDialogButtonBox.Ok).setText('加入生成队列');buttons.accepted.connect(self.accept_valid);buttons.rejected.connect(self.reject);outer.addWidget(buttons)
@@ -73,6 +75,10 @@ class GenerationDialog(QDialog):
         paths,_=QFileDialog.getOpenFileNames(self,'选择参考图片','','图片 (*.png *.jpg *.jpeg *.webp)')
         for p in paths:self.refs.addItem(self.project.import_file(p))
         self.preview()
+    def restore_prompt(self):
+        self.prompt_drafts[self.prompt_mode]=self.prompt.toPlainText();self.prompt_mode=self.mode.currentData()
+        saved=self.project.last_prompt(self.target,self.prompt_mode) if self.target else ''
+        self.prompt.setPlainText(self.prompt_drafts.get(self.prompt_mode,saved or self.prompt.toPlainText()))
     def add_existing(self):
         if self.available.currentData():self.refs.addItem(self.available.currentData());self.preview()
     def remove_ref(self):
@@ -108,13 +114,71 @@ class GenerationDialog(QDialog):
             self.accept()
         except Exception as e:message(self,e)
 
+class TaskDialog(QDialog):
+    def __init__(self,studio):
+        super().__init__(studio);self.studio=studio;self.setWindowTitle('任务管理 · 当前项目全部角色 / 场景 / 分镜');self.resize(980,650)
+        layout=QVBoxLayout(self);self.summary=QLabel();layout.addWidget(self.summary)
+        self.filter=QComboBox();self.filter.addItems(['全部','未完成','已完成','失败 / 未知','已取消']);self.filter.currentIndexChanged.connect(self.refresh_jobs);layout.addWidget(self.filter)
+        self.table=QTableWidget(0,5);self.table.setHorizontalHeaderLabels(['条目','工作流','状态','当前节点进度','创建时间']);self.table.setSelectionBehavior(QAbstractItemView.SelectRows);self.table.setSelectionMode(QAbstractItemView.SingleSelection);self.table.setEditTriggers(QAbstractItemView.NoEditTriggers);self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch);layout.addWidget(self.table)
+        self.details=QPlainTextEdit();self.details.setReadOnly(True);layout.addWidget(self.details);self.table.itemSelectionChanged.connect(self.show_details)
+        row=QHBoxLayout();layout.addLayout(row)
+        for label,fn in [('暂停 / 继续待执行队列',self.pause),('取消所选',self.cancel),('恢复查询',self.resume),('再次生成（审阅参数）',self.retry),('打开结果',self.open_result)]:row.addWidget(button(label,fn))
+        self.refresh_jobs()
+    def chosen(self):
+        cell=self.table.item(self.table.currentRow(),0)
+        return next((j for j in self.studio.project.data['jobs'] if cell and j['id']==cell.data(Qt.UserRole)),None)
+    def refresh_jobs(self):
+        current=self.chosen();ident=current['id'] if current else None
+        jobs=self.studio.project.data['jobs'];f=self.filter.currentIndex()
+        shown=[j for j in jobs if f==0 or (f==1 and j['status'] not in ('completed','cancelled')) or (f==2 and j['status']=='completed') or (f==3 and j['status'] in ('failed','unknown','detached')) or (f==4 and j['status']=='cancelled')]
+        self.summary.setText(f"总任务 {len(jobs)} · 已完成 {sum(j['status']=='completed' for j in jobs)} · 待执行 {sum(j['status']=='new' for j in jobs)} · "+('队列已暂停（当前任务继续）' if self.studio.project.data.get('queue_paused') else '队列可执行'))
+        self.table.blockSignals(True);self.table.setRowCount(len(shown))
+        for i,j in enumerate(shown):
+            try:name=self.studio.project.get(j['target'])['name']
+            except ValueError:name='已删除条目'
+            p=j.get('progress');progress=f"{j.get('node','')} {p['value']}/{p['max']}" if p else '—'
+            state={'new':'待执行','queued':'后端排队','submitting':'提交中','running':'运行中','downloading':'保存结果','completed':'完成','failed':'失败','unknown':'状态未知','detached':'已断开','cancelled':'已取消','cancel_requested':'正在取消'}.get(j['status'],j['status'])
+            for k,value in enumerate((name,MODES.get(j['generation']['mode'],j['generation']['mode']),state,progress,j.get('created','')[:19])):
+                cell=QTableWidgetItem(value);cell.setData(Qt.UserRole,j['id']);self.table.setItem(i,k,cell)
+            if j['id']==ident:self.table.selectRow(i)
+        self.table.blockSignals(False)
+        if not ident and shown:self.table.selectRow(0)
+        self.show_details()
+    def show_details(self):
+        j=self.chosen();text=json.dumps(j,ensure_ascii=False,indent=2) if j else ''
+        if self.details.toPlainText()!=text:self.details.setPlainText(text)
+    def pause(self):
+        p=self.studio.project;p.data['queue_paused']=not p.data.get('queue_paused',False);p.save();self.studio.start_next();self.refresh_jobs()
+    def cancel(self):
+        j=self.chosen()
+        if j:
+            try:self.studio.cancel_job(j)
+            except Exception as e:message(self,e)
+        self.refresh_jobs()
+    def resume(self):
+        j=self.chosen()
+        if j and j.get('prompt_id') and not self.studio.active and j['status'] in ('failed','unknown','detached','queued','running'):self.studio.start_job(j)
+    def retry(self):
+        j=self.chosen()
+        if not j:return
+        if j['status'] not in ('completed','cancelled'):
+            message(self,'状态不确定或失败的任务请先恢复查询，核对后再手动生成，避免重复提交。');return
+        try:self.studio.generate(self.studio.project.get(j['target']),j['generation']['mode'],Generation(**j['generation']))
+        except Exception as e:message(self,e)
+    def open_result(self):
+        j=self.chosen()
+        if j and j.get('outputs'):QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.studio.project.file(j['outputs'][0]))))
+
 class Studio(QMainWindow):
     def __init__(self,project_path=None):
         super().__init__();self.settings=QSettings('XiYi','AIStoryStudio');self.project=None;self.active=None;self.chat_worker=None;self.context_ids=[]
+        self.jobs_dialog=None
+        self.progress_bar=QProgressBar();self.progress_bar.setMinimumWidth(360);self.statusBar().addPermanentWidget(self.progress_bar)
+        self.task_timer=QTimer(self);self.task_timer.timeout.connect(self.update_task_status);self.task_timer.start(700)
         self.setWindowTitle('AI Story Studio · v'+__version__);self.resize(1440,920)
         self.tabs=QTabWidget();self.setCentralWidget(self.tabs)
         toolbar=self.addToolBar('项目')
-        for title,fn in [('新建项目',self.new_project),('打开项目',self.open_project),('保存',self.save),('设置',self.configure),('任务记录',self.show_jobs),('AI 对话',self.toggle_chat)]:
+        for title,fn in [('新建项目',self.new_project),('打开项目',self.open_project),('保存',self.save),('设置',self.configure),('任务管理',self.show_jobs),('AI 对话',self.toggle_chat)]:
             a=QAction(title,self);a.triggered.connect(fn);toolbar.addAction(a)
         self.dock=QDockWidget('AI 创作助手 · DeepSeek',self);self.dock.setMinimumWidth(300)
         chatbox=QWidget();cl=QVBoxLayout(chatbox);self.transcript=QTextEdit();self.transcript.setReadOnly(True);cl.addWidget(self.transcript)
@@ -133,7 +197,9 @@ class Studio(QMainWindow):
         if not self.guard():return
         path=QFileDialog.getExistingDirectory(self,'选择新项目文件夹')
         if path:
-            try:self.project=Project(path,True);self.context_ids=[];self.refresh()
+            try:
+                if self.jobs_dialog:self.jobs_dialog.close()
+                self.project=Project(path,True);self.context_ids=[];self.refresh()
             except Exception as e:message(self,e)
     def open_project(self):
         if not self.guard():return
@@ -141,6 +207,7 @@ class Studio(QMainWindow):
         if path:self.load_project(Path(path).parent)
     def load_project(self,path):
         try:
+            if self.jobs_dialog:self.jobs_dialog.close()
             self.project=Project(path);self.context_ids=[]
             # Job journals are authoritative for crash recovery.
             for j in self.project.data['jobs']:
@@ -172,10 +239,10 @@ class Studio(QMainWindow):
         self.tabs.setCurrentIndex(max(0,min(index,2)));self.render_chat()
     def set_story(self,text):self.project.data['story']=text;self.project.save()
     def thumbnail(self,relative,empty):
-        label=QLabel(empty);label.setAlignment(Qt.AlignCenter);label.setMinimumSize(180,110);label.setMaximumHeight(170)
+        label=QLabel(empty);label.setAlignment(Qt.AlignCenter);label.setFixedSize(240,240);label.setStyleSheet('QLabel {background:#edf0f4;border:1px solid #b7bcc6;border-radius:5px;}')
         if relative:
             pix=QPixmap(str(self.project.file(relative)))
-            if not pix.isNull():label.setPixmap(pix.scaled(270,160,Qt.KeepAspectRatio,Qt.SmoothTransformation))
+            if not pix.isNull():label.setPixmap(pix.scaled(228,228,Qt.KeepAspectRatio,Qt.SmoothTransformation))
         return label
     def card(self,kind,item):
         box=QGroupBox(item['name']);box.setMinimumWidth(240)
@@ -194,8 +261,8 @@ class Studio(QMainWindow):
         dl.addWidget(button('编辑描述',lambda:self.edit_item(kind,item)));layout.addWidget(details)
         dl.addWidget(button('生成历史',lambda:self.versions(item)))
         dl.addWidget(button('删除'+{'characters':'角色','scenes':'场景','shots':'分镜'}[kind],lambda:self.delete(item)))
-        imagebox=QWidget();il=QVBoxLayout(imagebox);il.addWidget(self.thumbnail(item['image'],'分镜图' if kind=='shots' else '参考图'))
-        il.addWidget(button('生成 / 编辑图片',lambda:self.generate(item,'qwen_edit' if item['image'] else 'qwen')));il.addWidget(button('导入图片',lambda:self.import_image(item)))
+        imagebox=QWidget();il=QVBoxLayout(imagebox);il.addWidget(self.thumbnail(item['image'],'分镜图' if kind=='shots' else '参考图'),0,Qt.AlignHCenter)
+        il.addWidget(button('生成 / 编辑图片',lambda:self.generate(item,self.image_mode(item))));il.addWidget(button('导入图片',lambda:self.import_image(item)))
         layout.addWidget(imagebox)
         if kind=='shots':
             vb=QWidget();vl=QVBoxLayout(vb)
@@ -203,7 +270,7 @@ class Studio(QMainWindow):
             if item['video']:
                 try:poster=video_poster(self.project,item['video'])
                 except Exception:pass
-            vl.addWidget(self.thumbnail(poster,'首帧读取失败' if item['video'] else '待生成视频'))
+            vl.addWidget(self.thumbnail(poster,'首帧读取失败' if item['video'] else '待生成视频'),0,Qt.AlignHCenter)
             if item['video']:vl.addWidget(QLabel('视频首帧预览'))
             vl.addWidget(button('生成视频',lambda:self.generate(item,'h3_i2v')))
             if item['video']:vl.addWidget(button('播放视频',lambda:self.play(item['video'])))
@@ -214,7 +281,7 @@ class Studio(QMainWindow):
         for name,fn in [('发送给 AI',lambda:self.add_context(item)),('生成历史',lambda:self.versions(item)),('删除条目',lambda:self.delete(item))]:m.addAction(name,fn)
         m.exec(box.mapToGlobal(pos))
     def delete(self,item):
-        if any(j['target']==item['id'] and j['status'] in ('new','submitting','queued','running') for j in self.project.data['jobs']):
+        if any(j['target']==item['id'] and j['status'] in ('new','submitting','queued','running','downloading') for j in self.project.data['jobs']):
             message(self,'此条目仍有生成任务，请先完成或取消任务。');return
         affected=[s['name'] for s in self.project.data['shots'] if item['id'] in s['materials']]
         text='删除“'+item['name']+'”？素材文件和历史输出仍保留。'
@@ -287,15 +354,20 @@ class Studio(QMainWindow):
         if mode.startswith('h3') and not any(s['id']==item['id'] for s in self.project.data['shots']):raise ValueError('视频只能在分镜中生成，请先新增分镜并关联素材。')
         if g is None:
             refs=[item['image']] if item['image'] and mode in ('h3_i2v','upscale','quad','qwen_edit') else []
-            g=Generation(mode=mode,prompt=item['description'],references=refs,megapixels=.2 if mode.startswith('h3') else 1,seconds=2 if mode.startswith('h3') else 5)
-        d=GenerationDialog(self.project,g,self)
+            g=Generation(mode=mode,prompt=self.project.last_prompt(item['id'],mode) or item['description'],references=refs,megapixels=.2 if mode.startswith('h3') else 1,seconds=2 if mode.startswith('h3') else 5)
+        d=GenerationDialog(self.project,g,self,target=item['id'])
         if d.exec():
             j={'id':uid(),'target':item['id'],'generation':asdict(d.g),'materials':copy.deepcopy([self.project.get(i) for i in item['materials']]),'status':'new','created':now()}
+            item.setdefault('last_prompts',{})[d.g.mode]=d.g.prompt
             self.project.data['jobs'].append(j);self.save();self.start_next()
             return j
         return None
+    def image_mode(self,item):
+        for j in reversed(self.project.data['jobs']):
+            if j['target']==item['id'] and j['generation']['mode'] in ('qwen','qwen_edit','krea','quad'):return j['generation']['mode']
+        return 'qwen_edit' if item['image'] else 'qwen'
     def start_next(self):
-        if self.active:return
+        if self.active or self.project.data.get('queue_paused'):return
         j=next((j for j in self.project.data['jobs'] if j['status']=='new'),None)
         if not j:return
         self.start_job(j)
@@ -312,28 +384,39 @@ class Studio(QMainWindow):
         self.project.save();self.statusBar().showMessage('生成任务：'+status)
     def job_result(self,j,snapshot,outputs):
         j.update(snapshot)
+        if j.get('cancelled_by_user') and not outputs:j['status']='cancelled';atomic_json(self.project.file('jobs/'+j['id']+'.json'),j)
         for p in outputs:self.project.attach_output(j,p)
         self.save();self.refresh()
     def job_error(self,j,snapshot,e):j.update(snapshot);self.save();message(self,e)
     def job_finished(self):self.active=None;self.worker.deleteLater();self.start_next()
+    def update_task_status(self):
+        jobs=self.project.data['jobs'] if self.project else []
+        pending=sum(j['status']=='new' for j in jobs)
+        if self.active:
+            j=self.active;p=j.get('progress');stage={'submitting':'提交中','queued':'后端排队','running':'运行中','downloading':'保存结果'}.get(j['status'],j['status'])
+            if p and p.get('max',0)>0:
+                self.progress_bar.setRange(0,int(p['max']));self.progress_bar.setValue(int(p['value']));self.progress_bar.setFormat(f"当前节点 {j.get('node','')}：%v/%m (%p%)")
+            else:self.progress_bar.setRange(0,0);self.progress_bar.setFormat(stage)
+            self.statusBar().showMessage(f'{stage} · 本地待执行 {pending}')
+        else:
+            self.progress_bar.setRange(0,1);self.progress_bar.setValue(0)
+            self.progress_bar.setFormat(('队列已暂停' if self.project and self.project.data.get('queue_paused') else '空闲')+f' · 待执行 {pending}')
+        if self.jobs_dialog and self.jobs_dialog.isVisible():self.jobs_dialog.refresh_jobs()
+    def cancel_job(self,j):
+        if j['status']=='new':
+            j['status']='cancelled';self.save();return
+        if not j.get('prompt_id') or j['status'] not in ('queued','running','cancel_requested'):return
+        result=Comfy(self.settings.value('comfy','http://127.0.0.1:8188')).cancel(j['prompt_id'])
+        if result=='cancelled':
+            j['cancelled_by_user']=True;j['status']='cancelled'
+            if self.active and self.active['id']==j['id']:self.worker.requestInterruption()
+            else:atomic_json(self.project.file('jobs/'+j['id']+'.json'),j)
+        elif result=='cancel_requested':j['status']='cancel_requested'
+        self.save()
     def show_jobs(self):
         if not self.project:return
-        d=QDialog(self);d.setWindowTitle('生成任务与恢复');d.resize(820,420);v=QVBoxLayout(d);ls=QListWidget();v.addWidget(ls)
-        jobs=self.project.data['jobs']
-        for j in jobs:ls.addItem(j['generation']['mode']+' · '+j['status']+' · '+j.get('prompt_id','未提交')+' '+j.get('error','')[:120])
-        def chosen():return jobs[ls.currentRow()] if ls.currentRow()>=0 else None
-        def resume():
-            j=chosen()
-            if j and j.get('prompt_id') and not self.active and j['status']!='completed':d.accept();self.start_job(j)
-        def cancel():
-            j=chosen()
-            if not j:return
-            try:
-                if j.get('prompt_id'):Comfy(self.settings.value('comfy','http://127.0.0.1:8188')).cancel(j['prompt_id'])
-                elif j['status']=='new':j['status']='cancelled';self.save()
-                d.accept()
-            except Exception as e:message(self,e)
-        v.addWidget(button('恢复查询（不会重复提交）',resume));v.addWidget(button('取消所选任务',cancel));d.exec()
+        if self.jobs_dialog:self.jobs_dialog.close()
+        self.jobs_dialog=TaskDialog(self);self.jobs_dialog.show()
     def add_context(self,item):
         if item['id'] not in self.context_ids:self.context_ids.append(item['id'])
         self.context_label.setText('发送上下文：'+', '.join(self.project.get(i)['name'] for i in self.context_ids));self.dock.show()

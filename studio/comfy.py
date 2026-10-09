@@ -3,6 +3,8 @@ import time
 import uuid
 from pathlib import Path
 import requests
+import websocket
+from urllib.parse import urlsplit
 from .workflows import Generation,build,preflight
 from .storage import atomic_json,now,uid
 
@@ -11,6 +13,34 @@ class Comfy:
         self.url=url.rstrip('/'); self.session=requests.Session()
         # Local inference must not be redirected through environment proxies.
         self.session.trust_env=False
+        self.client_id=str(uuid.uuid4());self.ws=None
+
+    def open_progress(self,client_id=None):
+        if client_id:self.client_id=client_id
+        try:
+            self.ws=websocket.create_connection(self.url.replace('http','ws',1)+'/ws?clientId='+self.client_id,timeout=.1,http_no_proxy=[urlsplit(self.url).hostname])
+        except Exception:self.ws=None
+
+    def progress_events(self,prompt_id):
+        events=[]
+        if self.ws is None:return events
+        try:
+            for _ in range(100):
+                raw=self.ws.recv()
+                if not raw:break
+                if not isinstance(raw,str):continue
+                event=json.loads(raw);data=event.get('data',{})
+                if data.get('prompt_id')==prompt_id and event.get('type') in ('progress','executing'):
+                    events.append(event)
+        except websocket.WebSocketTimeoutException:pass
+        except Exception:self.close_progress()
+        return events
+
+    def close_progress(self):
+        if self.ws:
+            try:self.ws.close()
+            except Exception:pass
+        self.ws=None
 
     def call(self,method,path,**kw):
         r=self.session.request(method,self.url+path,timeout=(10,60),**kw)
@@ -26,7 +56,7 @@ class Comfy:
         return '/'.join(v for v in (x.get('subfolder'),x['name']) if v)
 
     def submit(self,graph):
-        data=self.call('POST','/prompt',json={'prompt':graph,'client_id':str(uuid.uuid4())})
+        data=self.call('POST','/prompt',json={'prompt':graph,'client_id':self.client_id})
         if data.get('node_errors') or not data.get('prompt_id'): raise RuntimeError(json.dumps(data,ensure_ascii=False))
         return data['prompt_id']
 
@@ -67,6 +97,9 @@ def execute(client, project, job, notify=lambda s:None, stopping=lambda:False):
         atomic_json(project.file('jobs/'+job['id']+'.json'),job)
         notify(state)
     try:
+        if hasattr(client,'open_progress'):
+            client.open_progress(job.get('client_id'));job['client_id']=client.client_id
+        job.pop('progress',None)
         if not job.get('prompt_id'):
             g=Generation(**job['generation']); g.validate()
             uploaded=[client.upload(project.file(p)) for p in g.references]
@@ -80,6 +113,12 @@ def execute(client, project, job, notify=lambda s:None, stopping=lambda:False):
         misses=0
         while True:
             if stopping(): update('detached'); return []
+            for event in client.progress_events(pid) if hasattr(client,'progress_events') else []:
+                data=event['data'];node=data.get('node')
+                if event['type']=='executing':
+                    update('running',node=node,progress=None)
+                elif data.get('max',0)>0:
+                    update('running',node=node,progress={'value':data['value'],'max':data['max']})
             history=client.history(pid)
             if history:
                 status=history.get('status',{})
@@ -88,17 +127,20 @@ def execute(client, project, job, notify=lambda s:None, stopping=lambda:False):
                         update('cancelled');return []
                     raise RuntimeError(json.dumps(status.get('messages',[]),ensure_ascii=False)[:6000])
                 if status.get('completed'):
+                    update('downloading',progress=None)
                     files=client.download(history,project.file('outputs/'+job['id']))
                     relative=[p.relative_to(project.root).as_posix() for p in files]
                     update('completed',outputs=relative)
                     return relative
             q=client.queue()
-            if any(x[1]==pid for x in q.get('queue_running',[])): update('running')
-            elif any(x[1]==pid for x in q.get('queue_pending',[])): update('queued')
+            if any(x[1]==pid for x in q.get('queue_running',[])): misses=0;update('running')
+            elif any(x[1]==pid for x in q.get('queue_pending',[])): misses=0;update('queued')
             elif not history:
                 misses+=1
-                if misses>=4: raise RuntimeError('任务已不在队列且无历史记录；请检查 ComfyUI，未自动重交')
-            time.sleep(2)
+                if misses>=16: raise RuntimeError('任务已不在队列且无历史记录；请检查 ComfyUI，未自动重交')
+            time.sleep(.5)
     except Exception as e:
         update('unknown' if job.get('status')=='submitting' else 'failed',error=str(e))
         raise
+    finally:
+        if hasattr(client,'close_progress'):client.close_progress()

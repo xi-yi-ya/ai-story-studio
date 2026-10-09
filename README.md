@@ -1,17 +1,19 @@
-# AI Story Studio — v0.1.2
+# AI Story Studio — v0.1.3
 
 面向个人短故事创作者的 Windows 原生桌面工作台。PySide6/Qt Widgets 界面，调用本机 ComfyUI；DeepSeek 用于对话、故事组织和生成建议。
 
 ## 启动
 
 1. 启动已安装节点和模型的 ComfyUI，默认 `http://127.0.0.1:8188`。
-2. 双击 `releases/v0.1.2/AI-Story-Studio/AI-Story-Studio.exe`。
+2. 双击 `releases/v0.1.3/AI-Story-Studio/AI-Story-Studio.exe`。
 3. 新建空项目文件夹，或打开已有 `project.json`。项目可放在任意可写目录。
 4. 在设置中填 DeepSeek API Key（可以暂时不填，手工生成正常使用）。密钥存入 Windows 凭据管理器，不写入项目或 Git。
 
 源码运行：Python 3.12，`pip install -r requirements.txt`，`python main.py`。本机已创建 `.venv`，可运行 `run.ps1`。开发测试：`python -m pytest tests --basetemp local-data/pytest-local`（仅用此专用临时目录）。
 
 ## 使用
+
+v0.1.3：图片/视频预览固定为 240×240 方框，等比居中，不裁切原图。顶部“任务管理”统一管理当前项目全部条目的任务，支持筛选、取消、恢复查询、打开结果、审阅后再次生成与暂停/继续后续队列。状态栏显示 ComfyUI WebSocket 返回的当前节点步数；没有步数时显示阶段与忙碌动画，节点 100% 不代表整个任务完成，下载保存完成才登记成功。断开进度连接时继续查询任务结果，不伪造百分比。提示词按条目和工作流保存，旧项目从最近任务回填；切换工作流会保留窗口内各自草稿。只有确认加入队列的提示词持久保存，取消窗口不覆盖上次记录。
 
 - 顶部角色、场景、分镜板。角色/场景可新建、改描述、导入图、右击发送给 AI、查看版本或删除；有分镜引用时先解除关联。
 - 分镜板顶部保存故事，下面每行一个分镜，按描述和素材、图片、视频排列。

@@ -126,3 +126,23 @@ def test_h3_reference_prompt_uses_six_sections():
     with pytest.raises(ValueError):validate_prompt(args)
     args['prompt']='subject_definitions: x\nsummary: x\nretention_analysis: x\ndetailed_description: x\noverall_soundscape: x\nnon_diegetic_music: N/A'
     validate_prompt(args)
+
+def test_progress_events_ignore_other_prompts():
+    import json,websocket
+    c=Comfy()
+    class Socket:
+        def __init__(self):self.events=iter([json.dumps({'type':'progress','data':{'prompt_id':'other','value':9,'max':10}}),json.dumps({'type':'progress','data':{'prompt_id':'ours','node':'sample','value':2,'max':8}})])
+        def recv(self):
+            try:return next(self.events)
+            except StopIteration:raise websocket.WebSocketTimeoutException()
+    c.ws=Socket();events=c.progress_events('ours')
+    assert len(events)==1 and events[0]['data']['value']==2
+
+def test_real_step_progress_does_not_complete_before_output(tmp_path):
+    p=Project(tmp_path/'p',True);states=[]
+    class ProgressFake(Fake):
+        def progress_events(self,pid):return [{'type':'progress','data':{'node':'sample','value':8,'max':8}}]
+    j={'id':uid(),'prompt_id':'existing','generation':asdict(Generation(prompt='x')),'status':'running'}
+    execute(ProgressFake(p.root),p,j,lambda state:states.append((state,j.get('progress'))))
+    assert states[0]==('running',{'value':8,'max':8})
+    assert states[1][0]=='downloading' and states[-1][0]=='completed'
