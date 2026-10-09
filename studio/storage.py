@@ -1,0 +1,79 @@
+import json
+import os
+import shutil
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+def uid(): return uuid.uuid4().hex
+def now(): return datetime.now(timezone.utc).isoformat()
+def atomic_json(path, data):
+    path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
+    tmp=path.with_suffix(path.suffix+'.tmp')
+    with tmp.open('w',encoding='utf-8') as f:
+        json.dump(data,f,ensure_ascii=False,indent=2); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp,path)
+
+class Project:
+    def __init__(self, root, create=False):
+        self.root=Path(root).resolve(); self.path=self.root/'project.json'
+        if create:
+            if self.path.exists(): raise ValueError('该文件夹已有项目，请打开它')
+            self.data={'schema':1,'id':uid(),'title':self.root.name,'story':'','characters':[], 'scenes':[], 'shots':[], 'jobs':[], 'chat':[]}
+            self.save()
+        else:
+            self.data=json.loads(self.path.read_text(encoding='utf-8'))
+            if self.data.get('schema')!=1: raise ValueError('不支持的项目版本')
+        for folder in ('assets','outputs','jobs'): (self.root/folder).mkdir(exist_ok=True)
+
+    def save(self):
+        self.data['updated']=now()
+        atomic_json(self.path,self.data)
+
+    def file(self,relative):
+        p=(self.root/relative).resolve()
+        if not p.is_relative_to(self.root): raise ValueError('项目文件路径越界')
+        return p
+
+    def import_file(self,path):
+        path=Path(path).resolve()
+        if not path.is_file(): raise ValueError('素材不存在')
+        dest=self.root/'assets'/f'{uid()}{path.suffix.lower()}'
+        shutil.copy2(path,dest)
+        return dest.relative_to(self.root).as_posix()
+
+    def add(self,kind,name,description='',image=''):
+        if kind not in ('characters','scenes','shots'): raise ValueError('未知素材类型')
+        item={'id':uid(),'name':name.strip() or '未命名','description':description,'image':image,'video':'','materials':[], 'versions':[]}
+        self.data[kind].append(item); self.save(); return item
+
+    def get(self,ident):
+        for kind in ('characters','scenes','shots'):
+            for item in self.data[kind]:
+                if item['id']==ident: return item
+        raise ValueError('素材或分镜不存在')
+
+    def delete(self,ident):
+        affected=[s['name'] for s in self.data['shots'] if ident in s['materials']]
+        if affected: raise ValueError('仍被分镜引用，请先解除引用：'+', '.join(affected))
+        for kind in ('characters','scenes','shots'):
+            self.data[kind]=[x for x in self.data[kind] if x['id']!=ident]
+        # Files and generation history retained for recoverability.
+        self.save()
+
+    def mark_dependents(self,ident):
+        for shot in self.data['shots']:
+            if ident in shot['materials']:
+                shot['needs_review']=True
+        self.save()
+
+    def attach_output(self,job,relative):
+        try: item=self.get(job['target'])
+        except ValueError: return
+        if any(v.get('job')==job['id'] and v['file']==relative for v in item['versions']): return
+        media='video' if job['generation']['mode'].startswith('h3') else 'image'
+        version={'id':uid(),'time':now(),'job':job['id'],'kind':media,'file':relative,
+                 'intent':job['generation']['prompt'],'materials':job.get('materials',[])}
+        item['versions'].append(version); item[media]=relative
+        self.mark_dependents(item['id'])
+        self.save()

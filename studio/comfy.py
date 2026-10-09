@@ -1,0 +1,104 @@
+import json
+import time
+import uuid
+from pathlib import Path
+import requests
+from .workflows import Generation,build,preflight
+from .storage import atomic_json,now,uid
+
+class Comfy:
+    def __init__(self,url='http://127.0.0.1:8188'):
+        self.url=url.rstrip('/'); self.session=requests.Session()
+        # Local inference must not be redirected through environment proxies.
+        self.session.trust_env=False
+
+    def call(self,method,path,**kw):
+        r=self.session.request(method,self.url+path,timeout=(10,60),**kw)
+        if not r.ok: raise RuntimeError(f'ComfyUI HTTP {r.status_code}: {r.text[:2000]}')
+        return r.json()
+
+    def info(self): return self.call('GET','/object_info')
+    def queue(self): return self.call('GET','/queue')
+    def upload(self,path):
+        path=Path(path)
+        with path.open('rb') as f:
+            x=self.call('POST','/upload/image',files={'image':(uid()+path.suffix,f)},data={'type':'input','overwrite':'false','subfolder':'AIStoryStudio'})
+        return '/'.join(v for v in (x.get('subfolder'),x['name']) if v)
+
+    def submit(self,graph):
+        data=self.call('POST','/prompt',json={'prompt':graph,'client_id':str(uuid.uuid4())})
+        if data.get('node_errors') or not data.get('prompt_id'): raise RuntimeError(json.dumps(data,ensure_ascii=False))
+        return data['prompt_id']
+
+    def history(self,prompt_id): return self.call('GET','/history/'+prompt_id).get(prompt_id)
+
+    def cancel(self,prompt_id):
+        q=self.queue()
+        if any(x[1]==prompt_id for x in q.get('queue_pending',[])):
+            self.call('POST','/queue',json={'delete':[prompt_id]}); return 'cancelled'
+        if any(x[1]==prompt_id for x in q.get('queue_running',[])):
+            # Endpoint supports prompt_id on this installed backend; never interrupt globally.
+            self.call('POST','/interrupt',json={'prompt_id':prompt_id}); return 'cancel_requested'
+        return 'not_queued'
+
+    def download(self,history,dest):
+        outputs=history.get('outputs',{}).get('output',{})
+        files=[]
+        for key in ('images','videos','gifs'):
+            for entry in outputs.get(key,[]):
+                if entry.get('type')!='output': continue
+                name=Path(entry['filename']).name
+                if Path(name).suffix.lower() not in ('.png','.jpg','.jpeg','.webp','.mp4','.webm','.mkv'): continue
+                dest=Path(dest); dest.mkdir(parents=True,exist_ok=True)
+                target=dest/(uid()+Path(name).suffix.lower())
+                r=self.session.get(self.url+'/view',params={k:entry.get(k,'') for k in ('filename','subfolder','type')},timeout=(10,120))
+                r.raise_for_status(); target.write_bytes(r.content); files.append(target)
+        if not files: raise RuntimeError('任务完成但没有可读取的图片或视频输出')
+        return files
+
+def execute(client, project, job, notify=lambda s:None, stopping=lambda:False):
+    """Caller serializes execution and project writes. Persist id before polling.
+
+    A network error after submission is UNKNOWN, never automatically re-submit.
+    Resume jobs with a known prompt_id by calling this again.
+    """
+    def update(state,**fields):
+        job.update(status=state,updated=now(),**fields)
+        atomic_json(project.file('jobs/'+job['id']+'.json'),job)
+        notify(state)
+    try:
+        if not job.get('prompt_id'):
+            g=Generation(**job['generation']); g.validate()
+            uploaded=[client.upload(project.file(p)) for p in g.references]
+            graph=build(g,uploaded,'AIStoryStudio/'+job['id'])
+            preflight(graph,client.info())
+            atomic_json(project.file('jobs/'+job['id']+'-graph.json'),graph)
+            update('submitting')
+            prompt_id=client.submit(graph)
+            update('queued',prompt_id=prompt_id)
+        pid=job['prompt_id']
+        misses=0
+        while True:
+            if stopping(): update('detached'); return []
+            history=client.history(pid)
+            if history:
+                status=history.get('status',{})
+                if status.get('status_str')=='error':
+                    if any(m[0]=='execution_interrupted' for m in status.get('messages',[])):
+                        update('cancelled');return []
+                    raise RuntimeError(json.dumps(status.get('messages',[]),ensure_ascii=False)[:6000])
+                if status.get('completed'):
+                    files=client.download(history,project.file('outputs/'+job['id']))
+                    relative=[p.relative_to(project.root).as_posix() for p in files]
+                    update('completed',outputs=relative)
+                    return relative
+            q=client.queue()
+            if any(x[1]==pid for x in q.get('queue_running',[])): update('running')
+            elif any(x[1]==pid for x in q.get('queue_pending',[])): update('queued')
+            elif not history:
+                misses+=1
+                if misses>=4: raise RuntimeError('任务已不在队列且无历史记录；请检查 ComfyUI，未自动重交')
+            time.sleep(2)
+    except Exception as e:
+        update('unknown' if job.get('status')=='submitting' else 'failed',error=str(e))
+        raise
