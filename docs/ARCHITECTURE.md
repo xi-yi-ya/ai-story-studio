@@ -8,6 +8,6 @@ GUI（Qt 主线程）负责项目变更和审阅；推理 worker 使用项目快
 
 `storage.py` 项目相对路径、导入副本、原子 JSON 替换、生成历史。条目删除保留媒体文件。路径解析拒绝越出项目。中断恢复以 jobs journal 为准，重复输出注册幂等。
 
-`deepseek.py` 官方 chat/completions + tools。AI 只能提出 set_story / add_item / update_item / generate，字段校验且需 GUI 审阅。它不能执行系统命令或删除任意文件。真实 API 请求待密钥提供后验证；没有假装离线回复来自 DeepSeek。
+`deepseek.py` 官方 chat/completions + tools。AI 只能提出 set_story / add_item / update_item / generate，字段校验且需 GUI 审阅。它不能执行系统命令或删除任意文件。2026-10-09 已验证真实 API 文本及多轮工具消息，下一轮可以引用上一轮已完成图片的实际路径；并非自动执行未来输出依赖的任务图。
 
 与原工作流差异：Qwen 常规 8-bit PNG 保存；Qwen 编辑新增 VAE 和有序图像引用及确定性几何处理；四视图使用 source_image、VAE、target_latent 路径减少中途 VAE 换入，输出尺寸改为 GUI 选择；RFMSR 直接保存结果，省略 UI 清理/预览；H3 时长在客户端用相同表达式算好。明确排除独立电影工作流及断开的 Turbo/放大节点。
