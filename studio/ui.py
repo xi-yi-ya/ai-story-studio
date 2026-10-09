@@ -31,10 +31,12 @@ class GenerationDialog(QDialog):
     def __init__(self,project,g,parent=None):
         super().__init__(parent);self.project=project;self.g=g
         self.setWindowTitle('生成参数 · 提交前检查');self.resize(640,760)
-        outer=QVBoxLayout(self);body=QWidget();form=QFormLayout(body);outer.addWidget(scroll(body))
+        outer=QVBoxLayout(self);body=QWidget();form=QFormLayout(body);self.form=form;outer.addWidget(scroll(body))
         self.mode=QComboBox()
-        for k,v in MODES.items():self.mode.addItem(v,k)
-        self.mode.setCurrentIndex(list(MODES).index(g.mode));form.addRow('工作流',self.mode)
+        self.is_video=g.mode.startswith('h3')
+        for k,v in MODES.items():
+            if k.startswith('h3')==self.is_video:self.mode.addItem(v,k)
+        self.mode.setCurrentIndex(self.mode.findData(g.mode));form.addRow('视频工作流' if self.is_video else '图片工作流',self.mode)
         self.prompt=QPlainTextEdit(g.prompt);self.prompt.setMinimumHeight(110);form.addRow('提示词',self.prompt)
         self.ratio=QComboBox();self.ratio.addItems(RATIOS);self.ratio.setCurrentText(g.ratio);form.addRow('图片 / 视频比例',self.ratio)
         self.mp=QDoubleSpinBox();self.mp.setRange(.1,16);self.mp.setSingleStep(.1);self.mp.setValue(g.megapixels);form.addRow('分辨率（MP）',self.mp)
@@ -47,7 +49,7 @@ class GenerationDialog(QDialog):
         self.quad=QCheckBox('启用角色四视图 LoRA');self.quad.setChecked(g.quad_lora);form.addRow(self.quad)
         self.int8=QCheckBox('Qwen 使用本机 INT8 模型（省显存）');self.int8.setChecked(g.qwen_int8);form.addRow(self.int8)
         self.styles={}
-        group=QGroupBox('Krea2 风格 LoRA · 可分别启停');gl=QGridLayout(group)
+        group=QGroupBox('Krea2 风格 LoRA · 可分别启停');self.style_group=group;gl=QGridLayout(group)
         for i,name in enumerate(STYLES):
             cb=QCheckBox(name);cb.setChecked(name in g.styles);gl.addWidget(cb,i//3,i%3);self.styles[name]=cb
         form.addRow(group)
@@ -59,10 +61,12 @@ class GenerationDialog(QDialog):
             for item in project.data[kind]:
                 if item['image']:self.available.addItem(item['name'],item['image'])
         source_row=QWidget();sl=QHBoxLayout(source_row);sl.addWidget(self.available);sl.addWidget(button('加入参考',self.add_existing));form.addRow('项目素材',source_row)
-        row=QWidget();rl=QHBoxLayout(row);rl.addWidget(button('导入图片',self.add_refs));rl.addWidget(button('移除所选',lambda:self.refs.takeItem(self.refs.currentRow())));form.addRow(row)
+        row=QWidget();rl=QHBoxLayout(row);rl.addWidget(button('导入图片',self.add_refs));rl.addWidget(button('移除所选',self.remove_ref));rl.addWidget(button('上移',lambda:self.move_ref(-1)));rl.addWidget(button('下移',lambda:self.move_ref(1)));form.addRow(row)
+        self.reference_rows=(self.refs,source_row,row)
         self.summary=QLabel();self.summary.setWordWrap(True);form.addRow(self.summary)
         for w in (self.mp,self.seconds,self.scale):w.valueChanged.connect(self.preview)
         self.ratio.currentTextChanged.connect(self.preview);self.mode.currentIndexChanged.connect(self.preview)
+        self.cinema.toggled.connect(self.preview)
         self.preview()
         buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel);buttons.button(QDialogButtonBox.Ok).setText('加入生成队列');buttons.accepted.connect(self.accept_valid);buttons.rejected.connect(self.reject);outer.addWidget(buttons)
     def add_refs(self):
@@ -71,22 +75,33 @@ class GenerationDialog(QDialog):
         self.preview()
     def add_existing(self):
         if self.available.currentData():self.refs.addItem(self.available.currentData());self.preview()
+    def remove_ref(self):
+        if self.refs.currentRow()>=0:self.refs.takeItem(self.refs.currentRow());self.preview()
+    def move_ref(self,offset):
+        i=self.refs.currentRow();j=i+offset
+        if i>=0 and 0<=j<self.refs.count():self.refs.insertItem(j,self.refs.takeItem(i));self.refs.setCurrentRow(j);self.preview()
     def preview(self,*_):
         mode=self.mode.currentData();w,h=resolution(self.ratio.currentText(),self.mp.value(),32 if mode.startswith(('h3','qwen')) else 8)
         is_video=mode.startswith('h3')
-        self.seconds.setEnabled(is_video);self.cinema.setEnabled(is_video);self.strength.setEnabled(is_video)
+        self.seconds.setEnabled(is_video);self.cinema.setEnabled(is_video);self.strength.setEnabled(is_video and self.cinema.isChecked())
         self.quad.setEnabled(mode=='quad');self.int8.setEnabled(mode.startswith('qwen'))
         self.scale.setEnabled(mode=='upscale');self.mp.setEnabled(mode!='upscale');self.ratio.setEnabled(mode!='upscale')
         for cb in self.styles.values():cb.setEnabled(mode=='krea')
-        text=f'输出 {w} × {h}；H3 {frames(self.seconds.value())} 帧 / 24fps ≈ {frames(self.seconds.value())/24:.2f} 秒。'
+        for widget,visible in ((self.seconds,is_video),(self.cinema,is_video),(self.strength,is_video),(self.quad,mode=='quad'),(self.int8,mode.startswith('qwen')),(self.scale,mode=='upscale'),(self.style_group,mode=='krea'),(self.mp,mode!='upscale'),(self.ratio,mode!='upscale'),(self.prompt,mode!='upscale')):
+            self.form.setRowVisible(widget,visible)
+        for widget in self.reference_rows:self.form.setRowVisible(widget,mode not in ('qwen','krea','h3_t2v'))
+        text=f'输出 {w} × {h}。'
+        if is_video:text+=f'H3 {frames(self.seconds.value())} 帧 / 24fps ≈ {frames(self.seconds.value())/24:.2f} 秒。修改时长后请核对提示词时间线。视频建议先低分辨率、短时长测试；高规格未验证。'
+        if mode=='upscale':text='请选择一张图片，按原图尺寸放大。'
         if mode=='upscale' and self.refs.count():
             pix=QPixmap(str(self.project.file(self.refs.item(0).text())))
             text=f'预计放大至 {int(pix.width()*self.scale.value())} × {int(pix.height()*self.scale.value())}（以实际输出为准）。'
         if mode=='qwen_edit':text+=' 主参考图按此尺寸居中裁剪后编辑。'
-        self.summary.setText(text+' 视频建议先低分辨率、短时长测试；高规格未验证。')
+        self.summary.setText(text)
     def accept_valid(self):
         try:
             self.g=Generation(mode=self.mode.currentData(),prompt=self.prompt.toPlainText(),ratio=self.ratio.currentText(),megapixels=self.mp.value(),seconds=self.seconds.value(),seed=int(self.seed.text()),steps=self.steps.value(),cinema=self.cinema.isChecked(),cinema_strength=self.strength.value(),quad_lora=self.quad.isChecked(),qwen_int8=self.int8.isChecked(),styles=[k for k,v in self.styles.items() if v.isChecked()],scale=self.scale.value(),references=[self.refs.item(i).text() for i in range(self.refs.count())])
+            if self.g.mode in ('qwen','krea','h3_t2v'):self.g.references=[]
             self.g.validate()
             for r in self.g.references:
                 if not self.project.file(r).is_file():raise ValueError('参考图不存在：'+r)
@@ -150,9 +165,9 @@ class Studio(QMainWindow):
             if kind=='shots':
                 story=QPlainTextEdit(self.project.data['story']);story.setPlaceholderText('短故事描述');story.setMaximumHeight(120)
                 story.textChanged.connect(lambda s=story:self.set_story(s.toPlainText()));layout.addWidget(story)
-            layout.addWidget(button('+ 新增'+label,lambda checked=False,k=kind:self.edit_item(k)))
+            layout.addWidget(button('+ 新增'+('分镜' if kind=='shots' else label),lambda checked=False,k=kind:self.edit_item(k)))
             cards=QWidget();grid=QGridLayout(cards)
-            for i,item in enumerate(self.project.data[kind]):grid.addWidget(self.card(kind,item),i if kind=='shots' else i//3,0 if kind=='shots' else i%3)
+            for i,item in enumerate(self.project.data[kind]):grid.addWidget(self.card(kind,item),i,0)
             layout.addWidget(cards);layout.addStretch();self.tabs.addTab(scroll(container),label)
         self.tabs.setCurrentIndex(max(0,min(index,2)));self.render_chat()
     def set_story(self,text):self.project.data['story']=text;self.project.save()
@@ -164,7 +179,7 @@ class Studio(QMainWindow):
         return label
     def card(self,kind,item):
         box=QGroupBox(item['name']);box.setMinimumWidth(240)
-        layout=QHBoxLayout(box) if kind=='shots' else QVBoxLayout(box)
+        layout=QHBoxLayout(box)
         details=QWidget();dl=QVBoxLayout(details);desc=QLabel(item['description']);desc.setWordWrap(True);desc.setMaximumWidth(340);dl.addWidget(desc)
         if kind=='shots':
             names=[]
@@ -180,7 +195,7 @@ class Studio(QMainWindow):
         dl.addWidget(button('生成历史',lambda:self.versions(item)))
         dl.addWidget(button('删除'+{'characters':'角色','scenes':'场景','shots':'分镜'}[kind],lambda:self.delete(item)))
         imagebox=QWidget();il=QVBoxLayout(imagebox);il.addWidget(self.thumbnail(item['image'],'分镜图' if kind=='shots' else '参考图'))
-        il.addWidget(button('生成 / 编辑图片',lambda:self.generate(item,'qwen')));il.addWidget(button('导入图片',lambda:self.import_image(item)))
+        il.addWidget(button('生成 / 编辑图片',lambda:self.generate(item,'qwen_edit' if item['image'] else 'qwen')));il.addWidget(button('导入图片',lambda:self.import_image(item)))
         layout.addWidget(imagebox)
         if kind=='shots':
             vb=QWidget();vl=QVBoxLayout(vb)
@@ -192,11 +207,11 @@ class Studio(QMainWindow):
             if item['video']:vl.addWidget(QLabel('视频首帧预览'))
             vl.addWidget(button('生成视频',lambda:self.generate(item,'h3_i2v')))
             if item['video']:vl.addWidget(button('播放视频',lambda:self.play(item['video'])))
-            vl.addWidget(button('版本记录',lambda:self.versions(item)));layout.addWidget(vb)
+            layout.addWidget(vb)
         box.setContextMenuPolicy(Qt.CustomContextMenu);box.customContextMenuRequested.connect(lambda pos:self.card_menu(box,pos,kind,item));return box
     def card_menu(self,box,pos,kind,item):
         m=QMenu(self)
-        for name,fn in [('发送给 AI',lambda:self.add_context(item)),('版本记录',lambda:self.versions(item)),('高清放大',lambda:self.generate(item,'upscale')),('删除条目',lambda:self.delete(item))]:m.addAction(name,fn)
+        for name,fn in [('发送给 AI',lambda:self.add_context(item)),('生成历史',lambda:self.versions(item)),('删除条目',lambda:self.delete(item))]:m.addAction(name,fn)
         m.exec(box.mapToGlobal(pos))
     def delete(self,item):
         if any(j['target']==item['id'] and j['status'] in ('new','submitting','queued','running') for j in self.project.data['jobs']):
@@ -212,7 +227,11 @@ class Studio(QMainWindow):
         except Exception as e:message(self,e)
     def clear_review(self,item):item['needs_review']=False;self.save();self.refresh()
     def edit_item(self,kind,item=None):
-        d=QDialog(self);d.setWindowTitle('编辑条目');f=QFormLayout(d);name=QLineEdit(item['name'] if item else '');desc=QPlainTextEdit(item['description'] if item else '');f.addRow('名称',name);f.addRow('描述',desc)
+        if kind=='shots' and item is None:
+            self.project.add('shots','');self.refresh();return
+        d=QDialog(self);d.setWindowTitle('编辑条目');f=QFormLayout(d);name=QLineEdit(item['name'] if item else '');desc=QPlainTextEdit(item['description'] if item else '')
+        if kind!='shots':f.addRow('名称',name)
+        f.addRow('描述',desc)
         bb=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel);bb.accepted.connect(d.accept);bb.rejected.connect(d.reject);f.addRow(bb)
         if d.exec():
             if item:item.update(name=name.text() or '未命名',description=desc.toPlainText());self.project.mark_dependents(item['id'])
@@ -265,6 +284,7 @@ class Studio(QMainWindow):
         player=QMediaPlayer(d);audio=QAudioOutput(d);player.setAudioOutput(audio);player.setVideoOutput(screen);player.setSource(QUrl.fromLocalFile(str(self.project.file(path))))
         v.addWidget(button('播放 / 暂停',lambda:player.pause() if player.playbackState()==QMediaPlayer.PlayingState else player.play()));player.play();d.exec();player.stop()
     def generate(self,item,mode,g=None):
+        if mode.startswith('h3') and not any(s['id']==item['id'] for s in self.project.data['shots']):raise ValueError('视频只能在分镜中生成，请先新增分镜并关联素材。')
         if g is None:
             refs=[item['image']] if item['image'] and mode in ('h3_i2v','upscale','quad','qwen_edit') else []
             g=Generation(mode=mode,prompt=item['description'],references=refs,megapixels=.2 if mode.startswith('h3') else 1,seconds=2 if mode.startswith('h3') else 5)
@@ -375,7 +395,10 @@ class Studio(QMainWindow):
         if name=='add_item':return json.dumps(self.project.add(args['kind'],args['name'],args['description']),ensure_ascii=False)
         if name=='update_item':
             item=self.project.get(args['id'])
-            for i in args.get('materials',[]):self.project.get(i)
+            if 'materials' in args:
+                if not any(s['id']==item['id'] for s in self.project.data['shots']):raise ValueError('只有分镜可以关联角色和场景')
+                valid={a['id'] for a in self.project.data['characters']+self.project.data['scenes']}
+                if any(i not in valid for i in args['materials']):raise ValueError('分镜只能关联已有角色或场景')
             item['description']=args['description']
             if 'materials' in args:item['materials']=args['materials']
             self.project.mark_dependents(item['id']);self.save();return '条目已更新'

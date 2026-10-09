@@ -1,0 +1,37 @@
+[
+  {
+    "skill": "qwen",
+    "file": "SKILL.md",
+    "sha256": "d9c3559e844f5106bb0280580ddc2ecede60536811fafffcced0c37b3fb9661a"
+  },
+  {
+    "skill": "qwen",
+    "file": "references/t2i-guide.md",
+    "sha256": "5d07c0fafc8de5b3a90a89446b82a80b1257a97506c8e33b57fb3c83df236390"
+  },
+  {
+    "skill": "qwen",
+    "file": "references/edit-guide.md",
+    "sha256": "922d7b387ff1121455d1e915105c2473e08b3cea6540ec5ddb958c5de65f3299"
+  },
+  {
+    "skill": "qwen",
+    "file": "references/output-contracts.md",
+    "sha256": "22493d042dc490b39a2415ad8d01af17371aeb86f38a9747bab84ae4c10a4260"
+  },
+  {
+    "skill": "h3",
+    "file": "SKILL.md",
+    "sha256": "3c0d6e13f8f608e0ec4e0ad566521ea0dc64e80d16b5f5df3dea28e0d56a0697"
+  },
+  {
+    "skill": "h3",
+    "file": "references/base-en.txt",
+    "sha256": "088fb632fa3cbb18c9821024fb689e6f0f356f824c8f2e6b8e43a33239b137c7"
+  },
+  {
+    "skill": "h3",
+    "file": "references/ref-en.txt",
+    "sha256": "b621067b41988c4d92be715b7a98ba48338f4076ab6041d95fcf463ea7c8ccdd"
+  }
+]

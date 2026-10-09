@@ -6,6 +6,8 @@ from studio.storage import Project
 from studio.workflows import Generation
 from studio.ui import Studio
 from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QDialog,QGroupBox,QHBoxLayout
+import pytest
 
 app=QApplication.instance() or QApplication([])
 
@@ -32,4 +34,51 @@ def test_qwen_geometry_and_upscale_controls(tmp_path):
     assert not d.seconds.isEnabled() and d.int8.isEnabled()
     d.mode.setCurrentIndex(d.mode.findData('upscale'))
     assert d.scale.isEnabled() and not d.mp.isEnabled()
+    d.deleteLater()
+
+def test_media_entrypoints_and_irrelevant_controls(tmp_path):
+    p=Project(tmp_path/'p',True)
+    video=GenerationDialog(p,Generation(mode='h3_i2v'))
+    assert all(video.mode.itemData(i).startswith('h3') for i in range(video.mode.count()))
+    assert video.scale.isHidden() and video.quad.isHidden() and video.int8.isHidden()
+    image=GenerationDialog(p,Generation(mode='qwen'))
+    assert all(not image.mode.itemData(i).startswith('h3') for i in range(image.mode.count()))
+    assert image.mode.findData('upscale')>=0
+    assert image.seconds.isHidden() and 'H3' not in image.summary.text()
+    video.deleteLater();image.deleteLater()
+
+def test_new_shots_without_dialog_and_stable_ids(tmp_path,monkeypatch):
+    p=Project(tmp_path/'p',True);w=Studio(p.root)
+    def forbidden(*args):raise AssertionError('Unexpected pre-input dialog')
+    monkeypatch.setattr(QDialog,'exec',forbidden)
+    w.edit_item('shots');w.edit_item('shots');w.edit_item('shots')
+    shots=w.project.data['shots'];last_id=shots[-1]['id']
+    assert [s['name'] for s in shots]==['分镜 1','分镜 2','分镜 3']
+    w.project.delete(shots[1]['id'])
+    again=Project(p.root)
+    assert [s['name'] for s in again.data['shots']]==['分镜 1','分镜 2']
+    assert again.data['shots'][1]['id']==last_id
+    w.close()
+
+def test_all_cards_are_full_rows_and_invalid_ai_links_rejected(tmp_path):
+    p=Project(tmp_path/'p',True)
+    actor=p.add('characters','角色');scene=p.add('scenes','场景');shot=p.add('shots','旧名称')
+    w=Studio(p.root)
+    for kind in ('characters','scenes','shots'):
+        card=w.card(kind,w.project.data[kind][0])
+        assert isinstance(card.layout(),QHBoxLayout)
+        card.deleteLater()
+    with pytest.raises(ValueError):w.apply_action('update_item',{'id':shot['id'],'description':'x','materials':[shot['id']]})
+    with pytest.raises(ValueError):w.generate(actor,'h3_i2v')
+    assert w.project.get(shot['id'])['description']==''
+    w.close()
+
+def test_reference_order_and_text_only_mode_does_not_submit_hidden_refs(tmp_path):
+    p=Project(tmp_path/'p',True)
+    d=GenerationDialog(p,Generation(mode='qwen_edit',prompt='test',references=['first','last']))
+    d.refs.setCurrentRow(1);d.move_ref(-1)
+    assert [d.refs.item(i).text() for i in range(2)]==['last','first']
+    d.mode.setCurrentIndex(d.mode.findData('qwen'))
+    d.accept_valid()
+    assert d.result()==QDialog.Accepted and d.g.references==[]
     d.deleteLater()

@@ -104,3 +104,25 @@ def test_asset_change_marks_only_referencing_shots(tmp_path):
 def test_video_max_length_is_legal():
     assert frames(149)<=3600
     with pytest.raises(ValueError):frames(150)
+
+def test_h3_prompt_repair_is_bounded(monkeypatch):
+    import copy,json
+    calls=[]
+    complete='integrated_multimodal_description: [Shot 1] robot waves\noverall_soundscape: quiet room\nnon_diegetic_music: N/A'
+    args={'target':'shot','mode':'h3_i2v','prompt':'incomplete','references':['image.png']}
+    class Response:
+        ok=True
+        def json(self):
+            args['prompt']=complete if len(calls)==2 else 'incomplete'
+            return {'choices':[{'message':{'role':'assistant','tool_calls':[{'id':'t','function':{'name':'generate','arguments':json.dumps(args)}}]}}]}
+    def post(*a,**kw):calls.append(copy.deepcopy(kw['json']));return Response()
+    monkeypatch.setattr('studio.deepseek.requests.post',post)
+    assert chat('test','model',[],{})['tool_calls']
+    assert len(calls)==2 and '未通过' in calls[1]['messages'][-1]['content']
+
+def test_h3_reference_prompt_uses_six_sections():
+    from studio.deepseek import validate_prompt
+    args={'mode':'h3_ref','prompt':'integrated_multimodal_description: x\noverall_soundscape: y\nnon_diegetic_music: N/A'}
+    with pytest.raises(ValueError):validate_prompt(args)
+    args['prompt']='subject_definitions: x\nsummary: x\nretention_analysis: x\ndetailed_description: x\noverall_soundscape: x\nnon_diegetic_music: N/A'
+    validate_prompt(args)

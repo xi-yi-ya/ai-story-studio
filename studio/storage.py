@@ -25,8 +25,17 @@ class Project:
             self.data=json.loads(self.path.read_text(encoding='utf-8'))
             if self.data.get('schema')!=1: raise ValueError('不支持的项目版本')
         for folder in ('assets','outputs','jobs'): (self.root/folder).mkdir(exist_ok=True)
+        self.number_shots()
+
+    def number_shots(self):
+        for i,shot in enumerate(self.data['shots'],1):
+            name=f'分镜 {i}'
+            if shot['name']!=name:
+                shot.setdefault('original_name',shot['name'])
+                shot['name']=name
 
     def save(self):
+        self.number_shots()
         self.data['updated']=now()
         atomic_json(self.path,self.data)
 
