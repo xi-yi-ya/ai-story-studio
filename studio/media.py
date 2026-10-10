@@ -15,3 +15,18 @@ def video_poster(project,relative):
             if frame is None:raise ValueError('视频没有可解码帧')
             img=frame.to_image();img.thumbnail((480,270));img.save(target)
     return target.relative_to(project.root).as_posix()
+
+
+from functools import lru_cache
+
+@lru_cache(maxsize=256)
+def _duration(path,size,mtime):
+    with av.open(path) as container:
+        if container.duration is not None:return container.duration/av.time_base
+        stream=container.streams.video[0]
+        if stream.duration is not None:return float(stream.duration*stream.time_base)
+        raise ValueError('视频没有时长元数据')
+
+def video_duration(path):
+    path=Path(path);stat=path.stat()
+    return _duration(str(path),stat.st_size,stat.st_mtime_ns)

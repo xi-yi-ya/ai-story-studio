@@ -97,3 +97,7 @@ H3 均采用 0.2MP、输入 2 秒 → 608×352 / 56 帧 / 24fps / 实际 2.333 �
 - 实测发现 Windows 主线程读取 journal 时可能使 worker 原子替换返回 PermissionError；采用独立临时文件及有界短重试。旧失败测试已按原 prompt_id 恢复结果，没有重新提交推理。
 - 验证项目位于 local-data/v016-live-*；用户原项目保持不变，发布版打开 local-data/XY-Studio-v016 副本。
 - 最终实际链路通过：DeepSeek Flash → 创建雨夜便利店 → 参数确认 → Krea 0.1 MP / 4 步 → ComfyUI 完成 → 输出文件保存并归入正确场景历史。证据 local-data/v016-live-report.json，项目 v016-live-c7a8dcf5。视频未重跑，本次修改不涉及视频推理图。
+
+## v0.2.0 前端重构
+
+详见 UI-REFACTOR-v0.2.0.md：68 项测试通过；100/150/200% Qt DPI 模拟与 100 个长文本卡片通过；实际 DeepSeek 接续创建并提交低分辨率 Krea 图片成功，历史归属正确。未改变模型图、工具审阅权限及项目 schema。已知范围和 GUI 截图见交付文档。

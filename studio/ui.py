@@ -4,7 +4,7 @@ from pathlib import Path
 import keyring
 from PySide6.QtCore import Qt,QThread,Signal,QUrl,QSettings,QTimer,QTranslator
 from PySide6.QtGui import QPixmap,QDesktopServices,QAction,QIcon
-from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QPushButton,QLabel,QLineEdit,QTextEdit,QPlainTextEdit,QTabWidget,QScrollArea,QGroupBox,QDialog,QFormLayout,QComboBox,QDoubleSpinBox,QSpinBox,QCheckBox,QDialogButtonBox,QFileDialog,QMessageBox,QInputDialog,QMenu,QDockWidget,QListWidget,QListWidgetItem,QAbstractItemView,QTextBrowser,QProgressBar,QTableWidget,QTableWidgetItem,QHeaderView)
+from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QPushButton,QLabel,QLineEdit,QTextEdit,QPlainTextEdit,QTabWidget,QScrollArea,QGroupBox,QDialog,QFormLayout,QComboBox,QDoubleSpinBox,QSpinBox,QCheckBox,QDialogButtonBox,QFileDialog,QMessageBox,QInputDialog,QMenu,QDockWidget,QListWidget,QListWidgetItem,QAbstractItemView,QTextBrowser,QProgressBar,QTableWidget,QTableWidgetItem,QHeaderView,QStackedWidget,QFrame,QSizePolicy)
 from PySide6.QtMultimedia import QMediaPlayer,QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from .storage import Project,uid,now,atomic_json
@@ -17,6 +17,8 @@ from . import __version__
 from .action_targets import resolve_target
 from .chat_view import transcript_html
 from .image_viewer import ImageThumbnail,ImageViewer
+from .theme import QSS
+from .workspace import WorkspaceCard,AssetGrid,ShotTimeline,label,action_button
 
 def button(text,fn):
     b=QPushButton(text); b.clicked.connect(fn);return b
@@ -127,6 +129,7 @@ class TaskDialog(QDialog):
         layout=QVBoxLayout(self);self.summary=QLabel();layout.addWidget(self.summary)
         self.filter=QComboBox();self.filter.addItems(['全部','未完成','已完成','失败 / 未知','已取消']);self.filter.currentIndexChanged.connect(self.refresh_jobs);layout.addWidget(self.filter)
         self.table=QTableWidget(0,5);self.table.setHorizontalHeaderLabels(['条目','工作流','状态','当前节点进度','创建时间']);self.table.setSelectionBehavior(QAbstractItemView.SelectRows);self.table.setSelectionMode(QAbstractItemView.SingleSelection);self.table.setEditTriggers(QAbstractItemView.NoEditTriggers);self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch);layout.addWidget(self.table)
+        self.raw_details=QCheckBox('显示原始任务记录（排查问题）');self.raw_details.toggled.connect(self.show_details);layout.addWidget(self.raw_details)
         self.details=QPlainTextEdit();self.details.setReadOnly(True);layout.addWidget(self.details);self.table.itemSelectionChanged.connect(self.show_details)
         row=QHBoxLayout();layout.addLayout(row)
         for label,fn in [('暂停 / 继续待执行队列',self.pause),('取消所选',self.cancel),('恢复查询',self.resume),('再次生成（审阅参数）',self.retry),('打开结果',self.open_result)]:row.addWidget(button(label,fn))
@@ -152,7 +155,19 @@ class TaskDialog(QDialog):
         if not ident and shown:self.table.selectRow(0)
         self.show_details()
     def show_details(self):
-        j=self.chosen();text=json.dumps(j,ensure_ascii=False,indent=2) if j else ''
+        j=self.chosen();text=''
+        if j:
+            if self.raw_details.isChecked():text=json.dumps(j,ensure_ascii=False,indent=2)
+            else:
+                try:name=self.studio.project.get(j['target'])['name']
+                except ValueError:name='已删除条目'
+                g=j['generation'];state=self.table.item(self.table.currentRow(),2).text()
+                text=f"条目：{name}\n工作流：{MODES.get(g['mode'],g['mode'])}\n状态：{state}\n创建时间：{j.get('created','未记录')}\n"
+                if g.get('ratio'):text+=f"比例：{g['ratio']} · 分辨率：{g.get('megapixels','默认')} MP\n"
+                if g['mode'].startswith('h3') and 'seconds' in g:text+=f"预计视频时长：{frames(g['seconds'])/24:.2f} 秒\n"
+                if g['mode']=='upscale':text+=f"放大倍数：{g.get('scale','默认')}\n"
+                text+=f"参考图：{len(g.get('references',[]))} 张 · 已保存结果：{len(j.get('outputs',[]))} 个\n\n提示词\n{g.get('prompt','')}"
+                if j.get('error'):text+='\n\n错误信息（可通过恢复查询检查后端结果）\n'+j['error']
         if self.details.toPlainText()!=text:self.details.setPlainText(text)
     def pause(self):
         p=self.studio.project;p.data['queue_paused']=not p.data.get('queue_paused',False);p.save();self.studio.start_next();self.refresh_jobs()
@@ -180,16 +195,25 @@ class Studio(QMainWindow):
     def __init__(self,project_path=None):
         super().__init__();self.settings=QSettings('XiYi','AIStoryStudio');self.project=None;self.active=None;self.chat_worker=None;self.model_worker=None;self.context_ids=[]
         self.jobs_dialog=None
+        self.selected_id=None;self.collapsed_shots=set();self.card_widgets={};self.page_scrolls={};self.timeline=None;self.ui_project_root=None
         self.applying_chat=False;self.chat_finish_pending=False;self.chat_continue=False;self.chat_rounds=0;self.chat_expanded=set();self.chat_render_key=None
-        self.progress_bar=QProgressBar();self.progress_bar.setMinimumWidth(360);self.statusBar().addPermanentWidget(self.progress_bar)
+        self.progress_bar=QProgressBar();self.progress_bar.setMinimumWidth(230);self.statusBar().addPermanentWidget(self.progress_bar)
         self.task_timer=QTimer(self);self.task_timer.timeout.connect(self.update_task_status);self.task_timer.start(700)
-        self.setWindowTitle('XY Studio · v'+__version__);self.resize(1440,920)
-        self.tabs=QTabWidget();self.setCentralWidget(self.tabs)
+        self.setWindowTitle('XY Studio · v'+__version__);self.resize(1600,980);self.setMinimumSize(900,620);self.setStyleSheet(QSS)
+        screen=self.screen().availableGeometry();self.resize(max(900,min(1600,screen.width()-60)),max(620,min(980,screen.height()-80)))
+        self.tabs=QTabWidget();self.tabs.tabBar().hide()
+        shell=QWidget();shell.setObjectName('workspaceShell');shell_layout=QHBoxLayout(shell);shell_layout.setContentsMargins(0,0,0,0);shell_layout.setSpacing(0)
+        sidebar=QWidget();sidebar.setObjectName('sidebar');sidebar.setFixedWidth(154);sl=QVBoxLayout(sidebar);sl.setContentsMargins(12,12,12,12)
+        sl.addWidget(label('XY Studio','brand'));sl.addWidget(label('故事创作工作台'))
+        self.navigation=QListWidget();self.navigation.setObjectName('navigation');self.navigation.addItems(['项目概览','角色资产','场景资产','分镜工作区','任务与历史','全局设置']);sl.addWidget(self.navigation)
+        sl.addWidget(label('素材 → 镜头 → 视频'));sl.addWidget(label('v'+__version__))
+        shell_layout.addWidget(sidebar);self.workspace_stack=QStackedWidget();self.overview=QWidget();self.overview_layout=QVBoxLayout(self.overview);self.workspace_stack.addWidget(self.overview);self.workspace_stack.addWidget(self.tabs);self.tasks_page=QWidget();self.tasks_layout=QVBoxLayout(self.tasks_page);self.workspace_stack.addWidget(self.tasks_page);shell_layout.addWidget(self.workspace_stack,1);self.setCentralWidget(shell)
+        self.navigation.currentRowChanged.connect(self.navigate)
         toolbar=self.addToolBar('项目')
         for title,fn in [('新建项目',self.new_project),('打开项目',self.open_project),('保存',self.save),('设置',self.configure),('任务管理',self.show_jobs),('AI 对话',self.toggle_chat)]:
             a=QAction(title,self);a.triggered.connect(fn);toolbar.addAction(a)
-        self.dock=QDockWidget('AI 创作助手 · DeepSeek',self);self.dock.setMinimumWidth(300)
-        chatbox=QWidget();cl=QVBoxLayout(chatbox)
+        self.dock=QDockWidget('AI 创作助手 · DeepSeek',self);self.dock.setMinimumWidth(300);self.dock.setFeatures(QDockWidget.DockWidgetClosable);self.dock.setAllowedAreas(Qt.RightDockWidgetArea)
+        chatbox=QWidget();cl=QVBoxLayout(chatbox);cl.setContentsMargins(12,8,12,12);cl.setSpacing(10)
         options=QHBoxLayout();self.model_picker=QComboBox();self.model_picker.addItems(self.settings.value('model_list',DEFAULT_MODELS,type=list))
         current=self.settings.value('model','deepseek-flash')
         if self.model_picker.findText(current)<0:self.model_picker.addItem(current)
@@ -199,11 +223,12 @@ class Studio(QMainWindow):
         self.agent_status=QLabel('技能按需读取 · 联网使用同一 DeepSeek Key');self.agent_status.setWordWrap(True);cl.addWidget(self.agent_status)
         self.transcript=QTextBrowser();self.transcript.setOpenLinks(False);self.transcript.anchorClicked.connect(self.chat_link);cl.addWidget(self.transcript)
         nav=QHBoxLayout();self.my_messages=QComboBox();self.my_messages.setMinimumWidth(160);self.my_messages.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon);self.my_messages.activated.connect(self.jump_user);nav.addWidget(self.my_messages,1);nav.addWidget(button('最新消息',self.chat_latest));cl.addLayout(nav)
-        self.context_label=QLabel('右击素材卡可发送给 AI');self.context_label.setWordWrap(True);cl.addWidget(self.context_label)
+        self.context_label=QLabel('右击素材卡可发送给 AI');self.context_label.setWordWrap(True);cl.addWidget(self.context_label);cl.addWidget(button('清除素材上下文',self.clear_context))
         self.input=QPlainTextEdit();self.input.setMaximumHeight(120);self.input.setPlaceholderText('描述故事或修改目标……');cl.addWidget(self.input)
-        self.send=button('发送',self.send_chat);cl.addWidget(self.send)
-        cl.addWidget(button('导入子 agent 建议（临时测试）',self.import_agent))
+        self.send=button('发送',self.send_chat);self.send.setProperty('primary',True);cl.addWidget(self.send)
+        cl.addWidget(button('导入 AI 操作建议',self.import_agent))
         self.dock.setWidget(chatbox);self.addDockWidget(Qt.RightDockWidgetArea,self.dock)
+        self.resizeDocks([self.dock],[350],Qt.Horizontal)
         if project_path:self.load_project(project_path)
         else:self.refresh()
     def busy(self):return bool(self.active or self.chat_worker or self.model_worker)
@@ -237,23 +262,100 @@ class Studio(QMainWindow):
     def save(self):
         if self.project:self.project.save();self.statusBar().showMessage('项目已保存',3000)
     def toggle_chat(self):self.dock.setVisible(not self.dock.isVisible())
+    def navigate(self,index):
+        if index==0:self.workspace_stack.setCurrentIndex(0)
+        elif 1<=index<=3:
+            self.workspace_stack.setCurrentIndex(1);self.tabs.setCurrentIndex(index-1)
+        elif index==4:self.show_jobs()
+        elif index==5:
+            self.configure()
+            self.navigation.blockSignals(True);self.navigation.setCurrentRow(0 if self.workspace_stack.currentIndex()==0 else 4 if self.workspace_stack.currentIndex()==2 else self.tabs.currentIndex()+1);self.navigation.blockSignals(False)
+    def refresh_overview(self):
+        for row in range(1,5):
+            item=self.navigation.item(row);item.setFlags(item.flags()|Qt.ItemIsEnabled if self.project else item.flags()&~Qt.ItemIsEnabled)
+        while self.overview_layout.count():
+            part=self.overview_layout.takeAt(0)
+            if part.widget():part.widget().deleteLater()
+        self.overview_layout.setContentsMargins(28,24,28,24);self.overview_layout.setSpacing(18)
+        self.overview_layout.addWidget(label('项目概览','pageTitle'))
+        title=self.project.data['title'] if self.project else '从一个故事开始'
+        self.overview_layout.addWidget(label(title,'cardTitle'))
+        self.overview_layout.addWidget(label(str(self.project.root) if self.project else '创建项目，整理角色与场景，再逐个镜头生成图片和视频。'))
+        controls=QWidget();row=QHBoxLayout(controls);row.setContentsMargins(0,0,0,0)
+        for text,fn in [('新建项目',self.new_project),('打开项目',self.open_project),('保存项目',self.save)]:row.addWidget(action_button(text,fn,text=='新建项目'))
+        self.overview_layout.addWidget(controls)
+        if self.project:
+            counts=self.project.data
+            for index,(kind,title,desc) in enumerate([('characters','01  角色资产','保存角色形象、描述和每次生成版本。'),('scenes','02  场景资产','准备可复用的环境与空间参考。'),('shots','03  分镜工作区','关联素材，生成分镜图，再制作视频。')],1):
+                box=QFrame();box.setObjectName('overviewCard');v=QVBoxLayout(box);v.setContentsMargins(18,18,18,18);v.addWidget(label(title+f' · {len(counts[kind])}','cardTitle'));v.addWidget(label(desc));v.addWidget(action_button('进入工作区',lambda checked=False,i=index:self.navigation.setCurrentRow(i)));self.overview_layout.addWidget(box)
+            self.overview_layout.addWidget(label(f"生成记录 {len(counts['jobs'])} 条 · 已完成 {sum(j['status']=='completed' for j in counts['jobs'])} 条；历史保存在各自素材和镜头中。"))
+        self.overview_layout.addStretch()
+    def item_status(self,ident):
+        jobs=[j for j in self.project.data['jobs'] if j['target']==ident]
+        if not jobs:return '未生成'
+        j=jobs[-1];status={'new':'等待执行','submitting':'正在提交','queued':'后端排队','running':'生成中','downloading':'保存结果','completed':'已完成','failed':'失败 · 查看任务','unknown':'状态未知 · 恢复查询','detached':'已断开 · 恢复查询','cancelled':'已取消','cancel_requested':'取消中'}.get(j['status'],j['status'])
+        if j.get('progress'):status+=f" {j['progress']['value']}/{j['progress']['max']}"
+        return status
+    def shot_duration(self,item):
+        if item['video']:
+            try:
+                from .media import video_duration
+                return f"{video_duration(self.project.file(item['video'])):.2f} 秒"
+            except Exception:return '视频时长读取失败'
+        jobs=[j for j in self.project.data['jobs'] if j['target']==item['id'] and j['generation']['mode'].startswith('h3')]
+        return f"预计 {frames(jobs[-1]['generation']['seconds'])/24:.2f} 秒" if jobs else '时长待定'
     def refresh(self):
-        index=self.tabs.currentIndex()
+        index=self.tabs.currentIndex();positions={k:s.verticalScrollBar().value() for k,s in self.page_scrolls.items()}
+        current_root=str(self.project.root) if self.project else None
+        if current_root!=self.ui_project_root:
+            self.selected_id=None;self.collapsed_shots.clear();positions={};self.ui_project_root=current_root
+        self.card_widgets={};self.page_scrolls={};self.timeline=None
         while self.tabs.count():
             old=self.tabs.widget(0);self.tabs.removeTab(0);old.deleteLater()
+        self.refresh_overview()
         if not self.project:
-            self.tabs.addTab(QLabel('请新建或打开一个本地项目。素材、生成记录和对话均保存在项目文件夹中。'),'开始');return
+            self.navigation.setCurrentRow(0);self.render_chat();return
         self.setWindowTitle(f'XY Studio · {self.project.data["title"]} · v{__version__}')
-        for kind,label in [('characters','角色'),('scenes','场景'),('shots','分镜板')]:
-            container=QWidget();layout=QVBoxLayout(container)
+        for kind,title in [('characters','角色资产'),('scenes','场景资产'),('shots','分镜工作区')]:
+            page=QWidget();page.setObjectName('pageBody');layout=QVBoxLayout(page);layout.setContentsMargins(22,20,22,12);layout.setSpacing(12)
+            header=QHBoxLayout();header.addWidget(label(title,'pageTitle'),1);header.addWidget(action_button('+ 新增'+{'characters':'角色','scenes':'场景','shots':'分镜'}[kind],lambda checked=False,k=kind:self.edit_item(k),True));layout.addLayout(header)
+            layout.addWidget(label(f"{len(self.project.data[kind])} 个条目 · "+('素材 → 分镜图 → 视频 · 每次生成保留在原镜头中' if kind=='shots' else '选中素材与 AI 对话 · 双击图片查看 · 新版本保留历史')))
             if kind=='shots':
-                story=QPlainTextEdit(self.project.data['story']);story.setPlaceholderText('短故事描述');story.setMaximumHeight(120)
-                story.textChanged.connect(lambda s=story:self.set_story(s.toPlainText()));layout.addWidget(story)
-            layout.addWidget(button('+ 新增'+('分镜' if kind=='shots' else label),lambda checked=False,k=kind:self.edit_item(k)))
-            cards=QWidget();grid=QGridLayout(cards)
-            for i,item in enumerate(self.project.data[kind]):grid.addWidget(self.card(kind,item),i,0)
-            layout.addWidget(cards);layout.addStretch();self.tabs.addTab(scroll(container),label)
-        self.tabs.setCurrentIndex(max(0,min(index,2)));self.render_chat()
+                story=QPlainTextEdit(self.project.data['story']);story.setPlaceholderText('故事描述：先写下这个短故事，再按顺序添加镜头。');story.setFixedHeight(74);story.textChanged.connect(lambda s=story:self.set_story(s.toPlainText()));layout.addWidget(story)
+                self.timeline=ShotTimeline(self.project.data['shots'],{s['id']:self.shot_duration(s) for s in self.project.data['shots']});self.timeline.selected.connect(self.locate_shot);layout.addWidget(self.timeline)
+            cards=[self.card(kind,item) for item in self.project.data[kind]]
+            if kind=='shots':
+                body=QWidget();v=QVBoxLayout(body);v.setContentsMargins(0,0,0,0);v.setSpacing(16)
+                for c in cards:v.addWidget(c)
+                if not cards:v.addWidget(label('还没有分镜。点击右上角“新增分镜”，或请 AI 根据故事创建。'))
+                v.addStretch()
+            else:
+                body=QWidget();v=QVBoxLayout(body);v.setContentsMargins(0,0,0,0);v.addWidget(AssetGrid(cards))
+                if not cards:v.addWidget(label('这里还没有素材。可以新建条目并导入图片，也可以请 AI 帮你创建。'))
+                v.addStretch()
+            sc=scroll(body);self.page_scrolls[kind]=sc;layout.addWidget(sc,1);self.tabs.addTab(page,title)
+            QTimer.singleShot(0,sc,lambda widget=sc,value=positions.get(kind,0):widget.verticalScrollBar().setValue(value))
+        self.tabs.setCurrentIndex(max(0,min(index,2)))
+        if self.navigation.currentRow()<0:self.navigation.setCurrentRow(1)
+        self.update_selection();self.render_chat()
+        if self.navigation.currentRow()==4:self.show_jobs()
+    def update_selection(self):
+        valid={i['id']:i for k in ('characters','scenes','shots') for i in self.project.data[k]} if self.project else {}
+        self.context_ids=[i for i in self.context_ids if i in valid]
+        if self.selected_id not in valid:self.selected_id=None
+        for ident,card in self.card_widgets.items():card.set_selected(ident==self.selected_id)
+        if self.timeline:self.timeline.select(self.selected_id)
+        text='当前选择：'+valid[self.selected_id]['name'] if self.selected_id else '点击素材或分镜卡片，选择 AI 操作对象'
+        if self.context_ids:text+='\n附加素材：'+'、'.join(valid[i]['name'] for i in self.context_ids)
+        self.context_label.setText(text)
+    def select_item(self,ident):self.selected_id=ident;self.update_selection()
+    def clear_context(self):self.context_ids=[];self.selected_id=None;self.update_selection()
+    def locate_shot(self,ident):
+        self.select_item(ident);self.navigation.setCurrentRow(3)
+        if ident in self.card_widgets:self.page_scrolls['shots'].ensureWidgetVisible(self.card_widgets[ident],0,12)
+    def fold_shot(self,ident,collapsed):
+        if collapsed:self.collapsed_shots.add(ident)
+        else:self.collapsed_shots.discard(ident)
     def set_story(self,text):self.project.data['story']=text;self.project.save()
     def thumbnail(self,relative,empty):
         label=ImageThumbnail(empty);label.setAlignment(Qt.AlignCenter);label.setFixedSize(240,240);label.setStyleSheet('QLabel {background:#edf0f4;border:1px solid #b7bcc6;border-radius:5px;}')
@@ -267,37 +369,25 @@ class Studio(QMainWindow):
             d=ImageViewer(self.project.file(relative),QApplication.activeModalWidget() or self);d.setAttribute(Qt.WA_DeleteOnClose);d.show()
         except Exception as e:message(self,e)
     def card(self,kind,item):
-        box=QGroupBox(item['name']);box.setMinimumWidth(240)
-        layout=QHBoxLayout(box)
-        details=QWidget();dl=QVBoxLayout(details);desc=QLabel(item['description']);desc.setWordWrap(True);desc.setMaximumWidth(340);dl.addWidget(desc)
-        if kind=='shots':
-            names=[]
-            for ident in item['materials']:
-                try:names.append(self.project.get(ident)['name'])
-                except ValueError:names.append('已移除')
-            dl.addWidget(QLabel('使用素材：'+('、'.join(names) or '尚未关联')))
-            if item.get('needs_review'):
-                dl.addWidget(QLabel('关联素材已有修改 · 请检查此分镜'))
-                dl.addWidget(button('已检查，保留当前结果',lambda:self.clear_review(item)))
-            dl.addWidget(button('关联角色 / 场景',lambda:self.link_materials(item)))
-        dl.addWidget(button('编辑描述',lambda:self.edit_item(kind,item)));layout.addWidget(details)
-        dl.addWidget(button('生成历史',lambda:self.versions(item)))
-        dl.addWidget(button('删除'+{'characters':'角色','scenes':'场景','shots':'分镜'}[kind],lambda:self.delete(item)))
-        imagebox=QWidget();il=QVBoxLayout(imagebox);il.addWidget(self.thumbnail(item['image'],'分镜图' if kind=='shots' else '参考图'),0,Qt.AlignHCenter)
-        il.addWidget(button('生成 / 编辑图片',lambda:self.generate(item,self.image_mode(item))));il.addWidget(button('导入图片',lambda:self.import_image(item)))
-        layout.addWidget(imagebox)
-        if kind=='shots':
-            vb=QWidget();vl=QVBoxLayout(vb)
-            poster=''
-            if item['video']:
-                try:poster=video_poster(self.project,item['video'])
-                except Exception:pass
-            vl.addWidget(self.thumbnail(poster,'首帧读取失败' if item['video'] else '待生成视频'),0,Qt.AlignHCenter)
-            if item['video']:vl.addWidget(QLabel('视频首帧预览'))
-            vl.addWidget(button('生成视频',lambda:self.generate(item,'h3_i2v')))
-            if item['video']:vl.addWidget(button('播放视频',lambda:self.play(item['video'])))
-            layout.addWidget(vb)
-        box.setContextMenuPolicy(Qt.CustomContextMenu);box.customContextMenuRequested.connect(lambda pos:self.card_menu(box,pos,kind,item));return box
+        linked=[]
+        for ident in item['materials']:
+            try:linked.append(self.project.get(ident))
+            except ValueError:linked.append({'id':ident,'name':'已移除素材','image':''})
+        poster=''
+        if item['video']:
+            try:poster=video_poster(self.project,item['video'])
+            except Exception:pass
+        jobs=[j for j in self.project.data['jobs'] if j['target']==item['id']]
+        references=jobs[-1]['generation'].get('references',[]) if jobs else []
+        card=WorkspaceCard(kind,item,self.project.root,linked,poster,self.item_status(item['id']),item['id'] in self.collapsed_shots,references)
+        card.file_requested.connect(self.show_image)
+        card.selected.connect(self.select_item);card.folded.connect(self.fold_shot);card.action.connect(self.card_action);self.card_widgets[item['id']]=card;return card
+    def card_action(self,action,ident):
+        try:
+            item=self.project.get(ident);kind=next(k for k in ('characters','scenes','shots') if any(i['id']==ident for i in self.project.data[k]))
+            actions={'edit':lambda:self.edit_item(kind,item),'image':lambda:self.generate(item,self.image_mode(item)),'video':lambda:self.generate(item,'h3_i2v'),'view':lambda:self.show_image(item['image']) if item['image'] else None,'play':lambda:self.play(item['video']) if item['video'] else None,'history':lambda:self.versions(item),'context':lambda:self.add_context(item),'delete':lambda:self.delete(item),'import':lambda:self.import_image(item),'link':lambda:self.link_materials(item),'review':lambda:self.clear_review(item)}
+            actions[action]()
+        except Exception as e:message(self,e)
     def card_menu(self,box,pos,kind,item):
         m=QMenu(self)
         for name,fn in [('发送给 AI',lambda:self.add_context(item)),('生成历史',lambda:self.versions(item)),('删除条目',lambda:self.delete(item))]:m.addAction(name,fn)
@@ -320,11 +410,15 @@ class Studio(QMainWindow):
         if kind=='shots' and item is None:
             self.project.add('shots','');self.refresh();return
         d=QDialog(self);d.setWindowTitle('编辑条目');f=QFormLayout(d);name=QLineEdit(item['name'] if item else '');desc=QPlainTextEdit(item['description'] if item else '')
-        if kind!='shots':f.addRow('名称',name)
+        if kind=='shots':name.setText(item.get('original_name','') if item else '');f.addRow('镜头名称（编号自动保留）',name)
+        else:f.addRow('名称',name)
         f.addRow('描述',desc)
         bb=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel);bb.button(QDialogButtonBox.Cancel).setText('取消');bb.button(QDialogButtonBox.Ok if bb.button(QDialogButtonBox.Ok) else QDialogButtonBox.Save).setText('保存');bb.accepted.connect(d.accept);bb.rejected.connect(d.reject);f.addRow(bb)
         if d.exec():
-            if item:item.update(name=name.text() or '未命名',description=desc.toPlainText());self.project.mark_dependents(item['id'])
+            if item:
+                item['description']=desc.toPlainText()
+                item['original_name' if kind=='shots' else 'name']=name.text() or ('未命名' if kind!='shots' else '')
+                self.project.mark_dependents(item['id'])
             else:self.project.add(kind,name.text(),desc.toPlainText())
             self.refresh()
     def import_image(self,item):
@@ -428,6 +522,8 @@ class Studio(QMainWindow):
             self.progress_bar.setRange(0,1);self.progress_bar.setValue(0)
             self.progress_bar.setFormat(('队列已暂停' if self.project and self.project.data.get('queue_paused') else '空闲')+f' · 待执行 {pending}')
         if self.jobs_dialog and self.jobs_dialog.isVisible():self.jobs_dialog.refresh_jobs()
+        if self.project:
+            for ident,card in self.card_widgets.items():card.state.setText(self.item_status(ident))
     def cancel_job(self,j):
         if j['status']=='new':
             j['status']='cancelled';self.save();return
@@ -442,10 +538,15 @@ class Studio(QMainWindow):
     def show_jobs(self):
         if not self.project:return
         if self.jobs_dialog:self.jobs_dialog.close()
-        self.jobs_dialog=TaskDialog(self);self.jobs_dialog.show()
+        while self.tasks_layout.count():
+            entry=self.tasks_layout.takeAt(0)
+            if entry.widget():entry.widget().deleteLater()
+        self.jobs_dialog=TaskDialog(self);self.jobs_dialog.setWindowFlags(Qt.Widget)
+        self.tasks_layout.addWidget(label('任务与历史','pageTitle'));self.tasks_layout.addWidget(scroll(self.jobs_dialog))
+        self.workspace_stack.setCurrentIndex(2);self.navigation.blockSignals(True);self.navigation.setCurrentRow(4);self.navigation.blockSignals(False);self.jobs_dialog.show()
     def add_context(self,item):
         if item['id'] not in self.context_ids:self.context_ids.append(item['id'])
-        self.context_label.setText('发送上下文：'+', '.join(self.project.get(i)['name'] for i in self.context_ids));self.dock.show()
+        self.select_item(item['id']);self.dock.show()
     def configure(self):
         d=QDialog(self);d.setWindowTitle('设置');f=QFormLayout(d)
         url=QLineEdit(self.settings.value('comfy','http://127.0.0.1:8188'));model=QComboBox();model.addItems([self.model_picker.itemText(i) for i in range(self.model_picker.count())]);model.setCurrentText(self.model_picker.currentText());key=QLineEdit();key.setEchoMode(QLineEdit.Password);key.setPlaceholderText('留空保留现有密钥；保存到 Windows 凭据管理器')
@@ -509,7 +610,7 @@ class Studio(QMainWindow):
     def start_chat_request(self,key=None):
         key=key or keyring.get_password('AIStoryStudio','deepseek')
         self.send.setEnabled(False);self.chat_continue=False;self.chat_rounds+=1
-        context=copy.deepcopy({k:self.project.data[k] for k in ('story','characters','scenes','shots')});context['selected_ids']=list(self.context_ids)
+        context=copy.deepcopy({k:self.project.data[k] for k in ('story','characters','scenes','shots')});context['selected_ids']=list(dict.fromkeys(([self.selected_id] if self.selected_id else [])+self.context_ids))
         history=copy.deepcopy(self.project.data['chat']);model=self.model_picker.currentText();online=self.online.isChecked()
         self.chat_worker=Worker(lambda w:chat(key,model,history,context,online=online,notify=w.progress.emit))
         self.chat_worker.progress.connect(self.agent_status.setText)
@@ -603,5 +704,5 @@ def main():
     app.zh_translator=QTranslator(app)
     if app.zh_translator.load(str(Path(__file__).parent/'assets'/'qtbase_zh_CN.qm')):app.installTranslator(app.zh_translator)
     app.setWindowIcon(QIcon(str(Path(__file__).parent/'assets'/'xy-studio.ico')))
-    app.setStyleSheet('QGroupBox{font-weight:600;margin-top:12px;padding:12px;border:1px solid #b7bcc6;border-radius:6px} QPushButton{padding:7px} QTabBar::tab{padding:12px 32px} QTextEdit,QPlainTextEdit{font-size:14px}')
+    app.setStyleSheet(QSS)
     window=Studio(sys.argv[1] if len(sys.argv)>1 else None);window.show();return app.exec()
