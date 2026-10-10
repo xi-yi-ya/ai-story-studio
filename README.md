@@ -1,17 +1,19 @@
-# AI Story Studio — v0.1.4
+# XY Studio — v0.1.5
 
 面向个人短故事创作者的 Windows 原生桌面工作台。PySide6/Qt Widgets 界面，调用本机 ComfyUI；DeepSeek 用于对话、故事组织和生成建议。
 
 ## 启动
 
 1. 启动已安装节点和模型的 ComfyUI，默认 `http://127.0.0.1:8188`。
-2. 双击 `releases/v0.1.4/AI-Story-Studio/AI-Story-Studio.exe`。
+2. 双击 `releases/v0.1.5/XY-Studio/XY-Studio.exe`。
 3. 新建空项目文件夹，或打开已有 `project.json`。项目可放在任意可写目录。
 4. 在设置中填 DeepSeek API Key（可以暂时不填，手工生成正常使用）。密钥存入 Windows 凭据管理器，不写入项目或 Git。
 
 源码运行：Python 3.12，`pip install -r requirements.txt`，`python main.py`。本机已创建 `.venv`，可运行 `run.ps1`。开发测试：`python -m pytest tests --basetemp local-data/pytest-local`（仅用此专用临时目录）。
 
 ## 使用
+
+v0.1.5：产品更名 XY Studio，使用提供的 XY 图标。修复 AI 同轮新建后错误引用旧条目：新条目通过 `@新条目名称` 绑定，创建取消或失败则阻止生成；同轮新建与操作旧 ID 的歧义组合会被拦截，请下一轮单独操作已有条目。生成参数窗口显示归属名称及 ID。角色、场景、分镜共用该检查。保留旧项目格式、设置和凭据标识，可直接打开旧项目。
 
 v0.1.4：聊天区新增 DeepSeek 模型下拉框和“刷新模型”，从已保存密钥的 `/models` 接口获取账户可用列表；启动时用缓存列表，不自动切换模型。“允许 AI 联网检索”控制本轮检索工具，调用同一 DeepSeek Key 的 Anthropic 兼容搜索接口，会产生额外 API token 费用。检索结果显示来源链接与执行记录，不上传本地图片。关闭联网只关闭搜索，不关闭 DeepSeek 对话请求。
 

@@ -14,6 +14,7 @@ from .deepseek import chat,validate_action,list_models,DEFAULT_MODELS
 from .research import safe_link
 from .media import video_poster
 from . import __version__
+from .action_targets import resolve_target
 
 def button(text,fn):
     b=QPushButton(text); b.clicked.connect(fn);return b
@@ -34,6 +35,8 @@ class GenerationDialog(QDialog):
         self.target=target;self.prompt_mode=g.mode;self.prompt_drafts={g.mode:g.prompt}
         self.setWindowTitle('生成参数 · 提交前检查');self.resize(640,760)
         outer=QVBoxLayout(self);body=QWidget();form=QFormLayout(body);self.form=form;outer.addWidget(scroll(body))
+        self.target_label=QLabel('归属条目：'+project.get(target)['name']+'（'+target[:8]+'）' if target else '未指定条目')
+        self.target_label.setWordWrap(True);form.addRow(self.target_label)
         self.mode=QComboBox()
         self.is_video=g.mode.startswith('h3')
         for k,v in MODES.items():
@@ -176,7 +179,7 @@ class Studio(QMainWindow):
         self.jobs_dialog=None
         self.progress_bar=QProgressBar();self.progress_bar.setMinimumWidth(360);self.statusBar().addPermanentWidget(self.progress_bar)
         self.task_timer=QTimer(self);self.task_timer.timeout.connect(self.update_task_status);self.task_timer.start(700)
-        self.setWindowTitle('AI Story Studio · v'+__version__);self.resize(1440,920)
+        self.setWindowTitle('XY Studio · v'+__version__);self.resize(1440,920)
         self.tabs=QTabWidget();self.setCentralWidget(self.tabs)
         toolbar=self.addToolBar('项目')
         for title,fn in [('新建项目',self.new_project),('打开项目',self.open_project),('保存',self.save),('设置',self.configure),('任务管理',self.show_jobs),('AI 对话',self.toggle_chat)]:
@@ -235,7 +238,7 @@ class Studio(QMainWindow):
             old=self.tabs.widget(0);self.tabs.removeTab(0);old.deleteLater()
         if not self.project:
             self.tabs.addTab(QLabel('请新建或打开一个本地项目。素材、生成记录和对话均保存在项目文件夹中。'),'开始');return
-        self.setWindowTitle(f'AI Story Studio · {self.project.data["title"]} · v{__version__}')
+        self.setWindowTitle(f'XY Studio · {self.project.data["title"]} · v{__version__}')
         for kind,label in [('characters','角色'),('scenes','场景'),('shots','分镜板')]:
             container=QWidget();layout=QVBoxLayout(container)
             if kind=='shots':
@@ -484,11 +487,23 @@ class Studio(QMainWindow):
     def chat_finished(self):self.chat_worker.deleteLater();self.chat_worker=None;self.send.setEnabled(True);self.agent_status.setText('本轮结束 · 技能按需读取')
     def chat_result(self,msg):
         self.project.data['chat'].append(msg)
-        for call in msg.get('tool_calls',[]):
+        calls=msg.get('tool_calls',[]);created={}
+        for call in calls:
             name=call['function']['name'];args=json.loads(call['function']['arguments']);result='用户未采用此建议'
+            try:args=resolve_target(name,args,calls,created)
+            except ValueError as e:
+                result='操作未执行：'+str(e)
+                self.project.data['chat'].append({'role':'tool','tool_call_id':call['id'],'content':result})
+                message(self,e);continue
             d=QMessageBox(self);d.setWindowTitle('AI 操作建议');d.setText(name);d.setInformativeText(json.dumps(args,ensure_ascii=False,indent=2));d.setStandardButtons(QMessageBox.Apply|QMessageBox.Cancel)
             if d.exec()==QMessageBox.Apply:
-                try:result=self.apply_action(name,args)
+                try:
+                    result=self.apply_action(name,args)
+                    if name=='add_item':
+                        created[call['id']]=json.loads(result)['id']
+                        alias=args['name']
+                        matching=[c for c in calls if c['function']['name']=='add_item' and json.loads(c['function']['arguments']).get('name')==alias]
+                        if alias and len(matching)==1:created[alias]=json.loads(result)['id']
                 except Exception as e:result='操作失败：'+str(e);message(self,e)
             self.project.data['chat'].append({'role':'tool','tool_call_id':call['id'],'content':result})
         self.save();self.refresh()
@@ -526,6 +541,10 @@ class Studio(QMainWindow):
         self.save();event.accept()
 
 def main():
-    app=QApplication(sys.argv);app.setStyle('Fusion');app.setApplicationName('AI Story Studio')
+    if sys.platform=='win32':
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('XiYi.XYStudio')
+    app=QApplication(sys.argv);app.setStyle('Fusion');app.setApplicationName('XY Studio')
+    app.setWindowIcon(QIcon(str(Path(__file__).parent/'assets'/'xy-studio.ico')))
     app.setStyleSheet('QGroupBox{font-weight:600;margin-top:12px;padding:12px;border:1px solid #b7bcc6;border-radius:6px} QPushButton{padding:7px} QTabBar::tab{padding:12px 32px} QTextEdit,QPlainTextEdit{font-size:14px}')
     window=Studio(sys.argv[1] if len(sys.argv)>1 else None);window.show();return app.exec()
