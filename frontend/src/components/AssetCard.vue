@@ -25,6 +25,7 @@ import {
 import type { Asset } from "../types";
 import { useStudio } from "../stores/studio";
 import MediaThumb from "./MediaThumb.vue";
+import TaskProgress from "./TaskProgress.vue";
 const props = defineProps<{ asset: Asset }>();
 const emit = defineEmits<{
   edit: [id: string];
@@ -37,6 +38,15 @@ const store = useStudio();
 const current = computed(() =>
   props.asset.versions.find((v) => v.id === props.asset.current),
 );
+const task = computed(() => store.taskStatus(props.asset.id));
+function selectCard(event: MouseEvent) {
+  if ((event.target as HTMLElement).closest('button, a, input, select, textarea, summary, [role="menuitem"]')) return;
+  store.toggleSelection(props.asset.id);
+}
+function preview() {
+  store.select(props.asset.id);
+  emit('preview', props.asset.id);
+}
 const items = [{action:"import",name:"导入图片",icon:ImagePlus},
   { action: "context", name: "发送给 AI", icon: Send },
   { action: "edit", name: "编辑资料", icon: Pencil },
@@ -60,12 +70,14 @@ function act(action: string) {
         class="asset-card surface"
         :class="{ selected: store.selectedId === asset.id }"
         :data-testid="`asset-${asset.id}`"
-        @click="store.select(asset.id)"
+        @click="selectCard"
       >
         <button
           class="asset-image"
           :aria-label="`查看${asset.name}大图`"
-          @dblclick="emit('preview', asset.id)"
+          :aria-pressed="store.selectedId === asset.id"
+          @click.stop="store.toggleSelection(asset.id)"
+          @dblclick.stop="preview"
         >
           <MediaThumb :media="current?.media" :label="asset.name" /><span
             v-if="store.selectedId === asset.id"
@@ -107,7 +119,8 @@ function act(action: string) {
           <div class="asset-tags">
             <span v-for="tag in asset.tags" :key="tag">{{ tag }}</span>
           </div>
-        </div>
+      </div>
+        <TaskProgress :task="task" :paused="store.paused" />
         <footer>
           <button @click.stop="emit('generate', asset.id)">
             <ImagePlus :size="15" />生成新版本</button

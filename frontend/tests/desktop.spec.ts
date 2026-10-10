@@ -4,6 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 let browser:Browser,page:Page,root:string,original:string;
 let actor:string,scene:string,shot:string;
+const legacyRoot=path.resolve(process.env.XY_LEGACY || '../local-data/XY-Studio-v030-compat');
 test.describe.configure({mode:'serial'});
 async function rpc(command:string,payload:Record<string,unknown>={}){
  return page.evaluate(async([command,payload])=>await (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('studio').api(command,payload),[command,payload] as const);
@@ -31,7 +32,7 @@ test('new empty project, role and scene edit/import are persisted',async()=>{
  await page.getByLabel('描述',{exact:true}).fill('测试场景描述');
  await page.getByRole('button',{name:'确认创建',exact:true}).click();
  scene=(await state()).project.assets.find((a:any)=>a.kind==='scenes').id;
- const reference=path.resolve('../local-data/XY-Studio-v030-compat/assets/b1463e53334345328a91dc047816aec3.png');
+ const reference=path.join(legacyRoot,'assets/b1463e53334345328a91dc047816aec3.png');
  await rpc('asset.import',{id:actor,paths:[reference]});await rpc('asset.import',{id:scene,paths:[reference]});
  expect(JSON.parse(await fs.readFile(path.join(root,'project.json'),'utf8')).schema).toBe(1);
  await page.getByRole('button',{name:'角色资产',exact:true}).click();
@@ -52,6 +53,19 @@ test('double click image, zoom, history and right-click context',async()=>{
  await expect(page.locator('.context-banner')).toContainText('Vue 角色改名');
  expect((await state()).contextIds).toContain(actor);
 });
+test('role and scene images toggle selection while menus and preview preserve context',async()=>{
+ for(const [nav,id] of [['角色资产',actor],['场景资产',scene]]){
+  await page.getByRole('button',{name:nav,exact:true}).click();
+  await rpc('selection',{id:null});
+  const card=page.getByTestId('asset-'+id),image=card.locator('.asset-image');
+  await image.click();await expect(card).toHaveClass(/selected/);expect((await state()).selectedId).toBe(id);
+  await image.click();await expect(card).not.toHaveClass(/selected/);expect((await state()).selectedId).toBeNull();
+  await image.click();await card.getByRole('button',{name:/更多操作/}).click();
+  expect((await state()).selectedId).toBe(id);await page.keyboard.press('Escape');
+  await image.dblclick();await expect(page.getByRole('dialog')).toBeVisible();expect((await state()).selectedId).toBe(id);
+  await page.keyboard.press('Escape');await image.click();expect((await state()).selectedId).toBeNull();
+ }
+});
 test('shot numbering, real associations, timeline, folding and media mode boundaries',async()=>{
  await page.getByRole('button',{name:'分镜工作区',exact:true}).click();
  await page.getByRole('button',{name:'添加镜头',exact:true}).first().click();
@@ -61,6 +75,13 @@ test('shot numbering, real associations, timeline, folding and media mode bounda
  await page.locator('.link-option').first().click();await page.locator('.link-option').nth(1).click();
  await page.getByRole('button',{name:'保存关联',exact:true}).click();
  expect((await state()).project.shots[0].assetIds).toEqual([actor,scene]);
+ const card=page.getByTestId('shot-'+shot);
+ await rpc('asset.import',{id:shot,paths:[path.join(legacyRoot,'assets/b1463e53334345328a91dc047816aec3.png')]});
+ await rpc('selection',{id:null});
+ await card.locator('.shot-image').click();await expect(card).toHaveClass(/selected/);
+ await card.locator('.shot-image').click();await expect(card).not.toHaveClass(/selected/);expect((await state()).selectedId).toBeNull();
+ await card.getByRole('button',{name:'选择素材Vue 角色改名',exact:true}).click();expect((await state()).selectedId).toBe(actor);
+ await card.getByRole('button',{name:'选择素材Vue 角色改名',exact:true}).click();expect((await state()).selectedId).toBeNull();
  await page.getByRole('button',{name:'折叠镜头1',exact:true}).click();await expect(page.getByTestId('shot-'+shot).locator('.shot-body')).toHaveCount(0);
  await page.getByRole('button',{name:/定位镜头1/}).click();await expect(page.getByTestId('shot-'+shot).locator('.shot-body')).toBeVisible();
  await page.getByTestId('shot-'+shot).getByRole('button',{name:'生成图片',exact:true}).click();
@@ -80,7 +101,11 @@ test('queue parameters and cancellation persist, last prompt restored, no fake p
  await page.getByLabel('生成提示词').fill('界面测试提示词，实际加入暂停队列');await page.getByLabel('种子').fill('9223372036854775807');
  await page.getByRole('button',{name:'加入生成队列',exact:true}).click();
  let s=await state();expect(s.project.tasks[0].status).toBe('new');expect(s.project.tasks[0].progress).toBeNull();expect(s.project.tasks[0].generation.seed).toBe('9223372036854775807');
- await page.getByRole('button',{name:'任务与历史',exact:true}).click();await expect(page.locator('.mini-progress')).toHaveCount(0);
+ await expect(page.getByTestId('shot-'+shot).getByRole('progressbar')).toBeVisible();
+ await expect(page.getByTestId('shot-'+shot).getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
+ await expect(page.getByTestId('shot-'+shot)).toContainText('等待执行 · 队列已暂停');
+ await page.getByRole('button',{name:'任务与历史',exact:true}).click();
+ for(const bar of await page.getByRole('progressbar').all())await expect(bar).not.toHaveAttribute('aria-valuenow');
  await page.getByRole('button',{name:'取消',exact:true}).click();expect((await state()).project.tasks[0].status).toBe('cancelled');
  await page.getByRole('button',{name:'分镜工作区',exact:true}).click();await page.getByTestId('shot-'+shot).getByRole('button',{name:'生成图片',exact:true}).click();
  await expect(page.getByLabel('生成提示词')).toHaveValue('界面测试提示词，实际加入暂停队列');await page.getByRole('button',{name:'取消生成',exact:true}).click();
@@ -89,7 +114,7 @@ test('queue parameters and cancellation persist, last prompt restored, no fake p
  s=await state();expect(s.project.assets).toHaveLength(2);expect(s.project.shots[0].assetIds).toEqual([actor,scene]);expect(s.project.tasks[0].status).toBe('cancelled');
 });
 test('old real H3 video plays, seeks and retains history in its original shot',async()=>{
- await rpc('project.open',{path:path.resolve('../local-data/XY-Studio-v030-compat')});
+ await rpc('project.open',{path:legacyRoot});
  await page.getByRole('button',{name:'分镜工作区',exact:true}).click();
  const video=page.locator('video').first();await expect(video).toBeVisible();
  await page.waitForFunction(()=>document.querySelector('video')!.readyState>=2);
@@ -117,7 +142,7 @@ test('Agent import review and retry use real reactive parameter data without clo
  await page.getByRole('button',{name:'取消生成',exact:true}).click();
 });
 test('1920/2K/4K and browser zoom keep media, chat and navigation usable',async()=>{
- await rpc('project.open',{path:path.resolve('../local-data/XY-Studio-v030-compat')});
+ await rpc('project.open',{path:legacyRoot});
  await page.getByRole('button',{name:'分镜工作区',exact:true}).click();
  for(const [width,height] of [[1920,1080],[2560,1440],[3840,2160],[1024,768]]){
   await page.setViewportSize({width:width!,height:height!});

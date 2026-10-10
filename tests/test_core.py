@@ -138,6 +138,36 @@ def test_progress_events_ignore_other_prompts():
     c.ws=Socket();events=c.progress_events('ours')
     assert len(events)==1 and events[0]['data']['value']==2
 
+
+def test_progress_state_uses_only_running_nodes_of_our_prompt():
+    import websocket
+    c=Comfy()
+    class Socket:
+        def __init__(self):self.events=iter([
+            json.dumps({'type':'progress_state','data':{'prompt_id':'other','nodes':{'sample':{'state':'running','value':9,'max':10}}}}),
+            json.dumps({'type':'progress_state','data':{'prompt_id':'ours','nodes':{
+                'old':{'state':'finished','value':8,'max':8},
+                'sample':{'state':'running','value':3,'max':8},
+                'decode':{'state':'pending','value':0,'max':1}}}}),
+            json.dumps({'type':'progress_state','data':{'prompt_id':'ours','nodes':{'decode':{'state':'running','value':0,'max':0}}}})])
+        def recv(self):
+            try:return next(self.events)
+            except StopIteration:raise websocket.WebSocketTimeoutException()
+    c.ws=Socket();events=c.progress_events('ours')
+    assert events==[
+        {'type':'progress','data':{'prompt_id':'ours','node':'sample','value':3,'max':8}},
+        {'type':'executing','data':{'prompt_id':'ours','node':'decode'}}]
+
+
+def test_empty_success_response_from_comfy_cancel_is_accepted(monkeypatch):
+    c=Comfy()
+    class Response:
+        ok=True
+        content=b''
+        def json(self):raise AssertionError('Empty responses are not JSON')
+    monkeypatch.setattr(c.session,'request',lambda *a,**kw:Response())
+    assert c.call('POST','/queue',json={'delete':['ours']})=={}
+
 def test_real_step_progress_does_not_complete_before_output(tmp_path):
     p=Project(tmp_path/'p',True);states=[]
     class ProgressFake(Fake):

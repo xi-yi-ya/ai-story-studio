@@ -51,6 +51,7 @@ import TimelinePanel from "./components/TimelinePanel.vue";
 import VideoPreview from "./components/VideoPreview.vue";
 import GenerationForm from "./components/GenerationForm.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
+import TaskProgress from "./components/TaskProgress.vue";
 
 const store = useStudio();
 const nav = [
@@ -95,6 +96,8 @@ const tasks = computed(() =>
     .reverse()
     .filter((t) => taskFilter.value === "all" || t.status === taskFilter.value),
 );
+const activeTask = computed(() => store.project.tasks.find(t => t.id === store.state?.activeJob)
+  || store.project.tasks.find(t => ['new', 'submitting', 'queued', 'running', 'downloading', 'cancel_requested'].includes(t.status)));
 const modal = ref<
   "edit" | "generate" | "link" | "history" | "preview" | "project" | "review" | "delete" | null
 >(null);
@@ -355,6 +358,11 @@ onMounted(() => {
             <div v-if="store.connectionError" class="error-banner">{{store.connectionError}}<button class="text-action" @click="store.connectionError=''">已了解</button></div><div v-if="store.state?.error" class="error-banner">{{store.state.error}}<button class="text-action" @click="store.api('error.clear')">已了解</button></div><div v-if="store.persistenceError" class="error-banner">
               {{ store.persistenceError }}
             </div>
+            <section v-if="activeTask" class="active-generation surface" aria-label="当前生成任务">
+              <div><strong>{{ activeTask.targetName }}</strong><span class="muted">{{ activeTask.kind === 'video' ? '视频生成' : '图片生成' }} · 待完成 {{ store.pendingTasks }} 项</span></div>
+              <TaskProgress :task="activeTask" :paused="store.paused" />
+              <button class="text-action" @click="store.page='tasks'">查看任务</button>
+            </section>
             <template v-if="store.page === 'shots'">
               <section class="story-card surface">
                 <div class="flex items-center justify-between mb-2">
@@ -547,7 +555,7 @@ onMounted(() => {
                       t.error
                     }}</span>
                   </div>
-                  <div class="task-row-status"><small v-if="t.node">节点 {{t.node}} · {{t.steps ? `${t.steps.value}/${t.steps.max}` : '处理中'}}</small>
+                  <div class="task-row-status">
                     <span
                       class="status-pill"
                       :class="{
@@ -555,14 +563,9 @@ onMounted(() => {
                         error: t.status === 'failed',
                       }"
                       >{{ statusNames[t.status] }}
-                      {{ t.status === "running" && t.progress!==null ? `节点 ${Math.round(t.progress)}%` : "" }}</span
+                      </span
                     >
-                    <div
-                      v-if="t.status==='running' && t.progress!==null"
-                      class="mini-progress"
-                    >
-                      <i :style="{ width: `${t.progress}%` }" />
-                    </div>
+                    <TaskProgress :task="t" :paused="store.paused" />
                   </div>
                   <button
                     v-if="['new','running','queued','cancel_requested'].includes(t.status)"

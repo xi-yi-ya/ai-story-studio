@@ -511,7 +511,9 @@ class StudioService(QObject):
         if command == 'selection':
             ident = a.get('id')
             if ident: p.get(ident)
-            self.selected = ident
+            # Toggle against authoritative state so rapid clicks cannot race
+            # a Vue render. Navigation/pinning remain explicit selections.
+            self.selected = None if a.get('toggle') and self.selected == ident else ident
             if a.get('pin') and ident and ident not in self.context_ids:
                 self.context_ids.append(ident)
             if a.get('clear'): self.context_ids = []

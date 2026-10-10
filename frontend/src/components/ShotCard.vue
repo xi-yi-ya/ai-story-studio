@@ -26,6 +26,7 @@ import type { Shot, Version } from "../types";
 import { useStudio } from "../stores/studio";
 import MediaThumb from "./MediaThumb.vue";
 import VideoPreview from "./VideoPreview.vue";
+import TaskProgress from "./TaskProgress.vue";
 const props = defineProps<{ shot: Shot; index: number }>();
 const emit = defineEmits<{
   edit: [id: string];
@@ -64,6 +65,15 @@ const status = computed(() =>
 function toggleHistory(kind: "image" | "video") {
   history.value = history.value === kind ? null : kind;
 }
+function selectCard(event: MouseEvent) {
+  if ((event.target as HTMLElement).closest('button, a, input, select, textarea, summary, video, [role="menuitem"]')) return;
+  store.toggleSelection(props.shot.id);
+}
+function previewImage() {
+  if (!currentImage.value) return;
+  store.select(props.shot.id);
+  emit('preview', currentImage.value);
+}
 </script>
 <template>
   <article
@@ -74,10 +84,10 @@ function toggleHistory(kind: "image" | "video") {
     }"
     :id="`shot-${shot.id}`"
     :data-testid="`shot-${shot.id}`"
-    @click="store.select(shot.id)"
+    @click="selectCard"
   >
     <header class="shot-header">
-      <button class="shot-heading" @click.stop="store.select(shot.id)">
+      <button class="shot-heading" @click.stop="store.toggleSelection(shot.id)">
         <span class="shot-number"
           >SHOT {{ String(index + 1).padStart(2, "0") }}</span
         >
@@ -152,8 +162,10 @@ function toggleHistory(kind: "image" | "video") {
           <div v-for="asset in linked" :key="asset.id" class="linked-item">
             <button
               class="linked-image"
+              :class="{ selected: store.selectedId === asset.id }"
               :aria-label="`选择素材${asset.name}`"
-              @click.stop="store.select(asset.id)"
+              :aria-pressed="store.selectedId === asset.id"
+              @click.stop="store.toggleSelection(asset.id)"
             >
               <MediaThumb
                 :media="
@@ -193,7 +205,9 @@ function toggleHistory(kind: "image" | "video") {
           class="shot-image"
           :aria-label="`查看镜头${index + 1}分镜图`"
           :disabled="!currentImage"
-          @dblclick.stop="currentImage && emit('preview', currentImage)"
+          :aria-pressed="store.selectedId === shot.id"
+          @click.stop="store.toggleSelection(shot.id)"
+          @dblclick.stop="previewImage"
         >
           <MediaThumb :media="currentImage?.media" label="双击查看分镜大图" />
         </button>
@@ -246,9 +260,7 @@ function toggleHistory(kind: "image" | "video") {
         </div>
       </section>
     </div>
-    <div v-if="task?.status === 'running' && task.progress!==null" class="task-progress">
-      <span :style="{ width: `${task.progress}%` }" />
-    </div>
+    <TaskProgress :task="task" :paused="store.paused" />
     <div v-if="history && !shot.collapsed" class="inline-history">
       <div class="flex items-center justify-between">
         <span class="section-caption"

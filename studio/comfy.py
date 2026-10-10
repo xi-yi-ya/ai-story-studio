@@ -18,7 +18,8 @@ class Comfy:
     def open_progress(self,client_id=None):
         if client_id:self.client_id=client_id
         try:
-            self.ws=websocket.create_connection(self.url.replace('http','ws',1)+'/ws?clientId='+self.client_id,timeout=.1,http_no_proxy=[urlsplit(self.url).hostname])
+            self.ws=websocket.create_connection(self.url.replace('http','ws',1)+'/ws?clientId='+self.client_id,timeout=3,http_no_proxy=[urlsplit(self.url).hostname])
+            self.ws.settimeout(.1)
         except Exception:self.ws=None
 
     def progress_events(self,prompt_id):
@@ -32,6 +33,17 @@ class Comfy:
                 event=json.loads(raw);data=event.get('data',{})
                 if data.get('prompt_id')==prompt_id and event.get('type') in ('progress','executing'):
                     events.append(event)
+                elif data.get('prompt_id')==prompt_id and event.get('type')=='progress_state':
+                    # Recent ComfyUI versions also publish per-node snapshots.
+                    # Only running nodes are measurements of current work;
+                    # finished nodes must not look like total task completion.
+                    for node_id, state in data.get('nodes', {}).items():
+                        if state.get('state')!='running':continue
+                        node=state.get('node_id',node_id)
+                        if state.get('max',0)>0:
+                            events.append({'type':'progress','data':{'prompt_id':prompt_id,'node':node,'value':state['value'],'max':state['max']}})
+                        else:
+                            events.append({'type':'executing','data':{'prompt_id':prompt_id,'node':node}})
         except websocket.WebSocketTimeoutException:pass
         except Exception:self.close_progress()
         return events
@@ -45,7 +57,8 @@ class Comfy:
     def call(self,method,path,**kw):
         r=self.session.request(method,self.url+path,timeout=(10,60),**kw)
         if not r.ok: raise RuntimeError(f'ComfyUI HTTP {r.status_code}: {r.text[:2000]}')
-        return r.json()
+        # Queue deletion/interrupt may return HTTP 200 with an empty body.
+        return r.json() if r.content.strip() else {}
 
     def info(self): return self.call('GET','/object_info')
     def queue(self): return self.call('GET','/queue')

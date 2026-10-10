@@ -24,6 +24,7 @@ export const useStudio=defineStore('studio',()=>{
   async function initialize(){try{receive(await connect(receive,notify));if(hasProject.value)page.value='shots'}catch(e){connectionError.value=String(e)}}
   function fold(id:string,value:boolean){collapsed.set(id,value);const s=project.value.shots.find(s=>s.id===id);if(s)s.collapsed=value;}
   function select(id:string|null){void api('selection',{id}).catch(()=>{});}
+  function toggleSelection(id:string){void api('selection',{id,toggle:true}).catch(()=>{});}
   function clearContext(){void api('selection',{id:null,clear:true}).catch(()=>{});}
   function pin(id:string){assistantOpen.value=true;void api('selection',{id,pin:true}).catch(()=>{});}
   async function openProject(path?:string){const result=await api('project.open',path?{path}:{});if(result)page.value='shots';}
@@ -35,7 +36,7 @@ export const useStudio=defineStore('studio',()=>{
   function remove(id:string){return api('asset.delete',{id})}
   function importImage(id:string){return api('asset.import',{id})}
   function useVersion(id:string,version:string){return api('version.use',{id,version})}
-  function taskStatus(id:string){return [...project.value.tasks].reverse().find(t=>t.targetId===id)}
+  function taskStatus(id:string){const tasks=project.value.tasks.filter(t=>t.targetId===id);return tasks.find(t=>t.id===state.value?.activeJob)||tasks.find(t=>['new','submitting','queued','running','downloading','cancel_requested'].includes(t.status))||tasks.at(-1)}
   function defaults(target:string,mode?:string){return api<Generation>('generation.defaults',{target,...(mode?{mode}:{})})}
   function queueGeneration(target:string,generation:Generation){return api<string>('generation.submit',{target,generation})}
   function toggleQueue(){return api('queue.toggle')}
@@ -52,5 +53,5 @@ export const useStudio=defineStore('studio',()=>{
   function importAgent(){return api('agent.import')}
   function openFile(file:string){return api('media.open',{file})}
   function reviewed(id:string){return api('asset.reviewed',{id})}
-  return {state,connectionError,ready,page,project,hasProject,projects,assistantOpen,selectedId,selection,model,online,paused,busy,totalDuration,pendingTasks,toast,persistenceError,notify,api,initialize,fold,select,clearContext,pin,openProject,createProject,newShot,addAsset,editAsset,link,remove,importImage,useVersion,taskStatus,defaults,queueGeneration,toggleQueue,cancelTask,resumeTask,sendChat,reviewSuggestion,save,saveStory,refreshModels,saveSettings,openLink,folder,importAgent,openFile,reviewed};
+  return {state,connectionError,ready,page,project,hasProject,projects,assistantOpen,selectedId,selection,model,online,paused,busy,totalDuration,pendingTasks,toast,persistenceError,notify,api,initialize,fold,select,toggleSelection,clearContext,pin,openProject,createProject,newShot,addAsset,editAsset,link,remove,importImage,useVersion,taskStatus,defaults,queueGeneration,toggleQueue,cancelTask,resumeTask,sendChat,reviewSuggestion,save,saveStory,refreshModels,saveSettings,openLink,folder,importAgent,openFile,reviewed};
 });

@@ -60,6 +60,23 @@ def test_schema_ids_crud_history_and_reopen(service, tmp_path):
     assert s.project.get(shot)['materials']==[b] and s.project.file(first).exists()
 
 
+def test_selection_toggle_is_atomic_without_clearing_pinned_context(service):
+    s=service
+    actor=call(s,'asset.add',kind='characters',name='角色')
+    scene=call(s,'asset.add',kind='scenes',name='场景')
+    shot=call(s,'asset.add',kind='shots')
+    for ident in (actor,scene,shot):
+        call(s,'selection',id=ident,toggle=True)
+        assert s.snapshot()['selectedId']==ident
+        call(s,'selection',id=ident,toggle=True)
+        assert s.snapshot()['selectedId'] is None
+    call(s,'selection',id=actor,pin=True)
+    call(s,'selection',id=actor,toggle=True)
+    assert s.selected is None and s.context_ids==[actor]
+    call(s,'selection',id=shot);call(s,'selection',id=shot)
+    assert s.selected==shot  # Timeline navigation remains idempotent.
+
+
 def test_seed_exact_precision_and_cancelled_prompt_does_not_overwrite(service):
     s=service;a=call(s,'asset.add',kind='characters',name='角色')
     s.project.data['queue_paused']=True
