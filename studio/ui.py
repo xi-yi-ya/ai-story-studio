@@ -2,7 +2,7 @@ import copy,json,os,sys,html,re
 from dataclasses import asdict
 from pathlib import Path
 import keyring
-from PySide6.QtCore import Qt,QThread,Signal,QUrl,QSettings,QTimer
+from PySide6.QtCore import Qt,QThread,Signal,QUrl,QSettings,QTimer,QTranslator
 from PySide6.QtGui import QPixmap,QDesktopServices,QAction,QIcon
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QPushButton,QLabel,QLineEdit,QTextEdit,QPlainTextEdit,QTabWidget,QScrollArea,QGroupBox,QDialog,QFormLayout,QComboBox,QDoubleSpinBox,QSpinBox,QCheckBox,QDialogButtonBox,QFileDialog,QMessageBox,QInputDialog,QMenu,QDockWidget,QListWidget,QListWidgetItem,QAbstractItemView,QTextBrowser,QProgressBar,QTableWidget,QTableWidgetItem,QHeaderView)
 from PySide6.QtMultimedia import QMediaPlayer,QAudioOutput
@@ -15,10 +15,13 @@ from .research import safe_link
 from .media import video_poster
 from . import __version__
 from .action_targets import resolve_target
+from .chat_view import transcript_html
+from .image_viewer import ImageThumbnail,ImageViewer
 
 def button(text,fn):
     b=QPushButton(text); b.clicked.connect(fn);return b
-def message(parent,e): QMessageBox.warning(parent,'提示',str(e))
+def message(parent,e):
+    d=QMessageBox(QMessageBox.Warning,'提示',str(e),QMessageBox.Ok,parent);d.button(QMessageBox.Ok).setText('知道了');d.exec()
 def scroll(widget):
     s=QScrollArea();s.setWidgetResizable(True);s.setWidget(widget);return s
 
@@ -74,7 +77,7 @@ class GenerationDialog(QDialog):
         self.mode.currentIndexChanged.connect(self.restore_prompt)
         self.cinema.toggled.connect(self.preview)
         self.preview()
-        buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel);buttons.button(QDialogButtonBox.Ok).setText('加入生成队列');buttons.accepted.connect(self.accept_valid);buttons.rejected.connect(self.reject);outer.addWidget(buttons)
+        buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel);buttons.button(QDialogButtonBox.Ok).setText('加入生成队列');buttons.button(QDialogButtonBox.Cancel).setText('取消生成');buttons.accepted.connect(self.accept_valid);buttons.rejected.connect(self.reject);outer.addWidget(buttons)
     def add_refs(self):
         paths,_=QFileDialog.getOpenFileNames(self,'选择参考图片','','图片 (*.png *.jpg *.jpeg *.webp)')
         for p in paths:self.refs.addItem(self.project.import_file(p))
@@ -177,6 +180,7 @@ class Studio(QMainWindow):
     def __init__(self,project_path=None):
         super().__init__();self.settings=QSettings('XiYi','AIStoryStudio');self.project=None;self.active=None;self.chat_worker=None;self.model_worker=None;self.context_ids=[]
         self.jobs_dialog=None
+        self.applying_chat=False;self.chat_finish_pending=False;self.chat_continue=False;self.chat_rounds=0;self.chat_expanded=set();self.chat_render_key=None
         self.progress_bar=QProgressBar();self.progress_bar.setMinimumWidth(360);self.statusBar().addPermanentWidget(self.progress_bar)
         self.task_timer=QTimer(self);self.task_timer.timeout.connect(self.update_task_status);self.task_timer.start(700)
         self.setWindowTitle('XY Studio · v'+__version__);self.resize(1440,920)
@@ -193,7 +197,8 @@ class Studio(QMainWindow):
         options.addWidget(self.model_picker);self.model_refresh=button('刷新模型',self.refresh_models);options.addWidget(self.model_refresh);cl.addLayout(options)
         self.online=QCheckBox('允许 AI 联网检索');self.online.setChecked(self.settings.value('online_search',True,type=bool));self.online.toggled.connect(lambda value:self.settings.setValue('online_search',value));cl.addWidget(self.online)
         self.agent_status=QLabel('技能按需读取 · 联网使用同一 DeepSeek Key');self.agent_status.setWordWrap(True);cl.addWidget(self.agent_status)
-        self.transcript=QTextBrowser();self.transcript.setOpenLinks(False);self.transcript.anchorClicked.connect(lambda url:QDesktopServices.openUrl(url) if safe_link(url.toString()) else None);cl.addWidget(self.transcript)
+        self.transcript=QTextBrowser();self.transcript.setOpenLinks(False);self.transcript.anchorClicked.connect(self.chat_link);cl.addWidget(self.transcript)
+        nav=QHBoxLayout();self.my_messages=QComboBox();self.my_messages.setMinimumWidth(160);self.my_messages.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon);self.my_messages.activated.connect(self.jump_user);nav.addWidget(self.my_messages,1);nav.addWidget(button('最新消息',self.chat_latest));cl.addLayout(nav)
         self.context_label=QLabel('右击素材卡可发送给 AI');self.context_label.setWordWrap(True);cl.addWidget(self.context_label)
         self.input=QPlainTextEdit();self.input.setMaximumHeight(120);self.input.setPlaceholderText('描述故事或修改目标……');cl.addWidget(self.input)
         self.send=button('发送',self.send_chat);cl.addWidget(self.send)
@@ -251,11 +256,16 @@ class Studio(QMainWindow):
         self.tabs.setCurrentIndex(max(0,min(index,2)));self.render_chat()
     def set_story(self,text):self.project.data['story']=text;self.project.save()
     def thumbnail(self,relative,empty):
-        label=QLabel(empty);label.setAlignment(Qt.AlignCenter);label.setFixedSize(240,240);label.setStyleSheet('QLabel {background:#edf0f4;border:1px solid #b7bcc6;border-radius:5px;}')
+        label=ImageThumbnail(empty);label.setAlignment(Qt.AlignCenter);label.setFixedSize(240,240);label.setStyleSheet('QLabel {background:#edf0f4;border:1px solid #b7bcc6;border-radius:5px;}')
         if relative:
             pix=QPixmap(str(self.project.file(relative)))
-            if not pix.isNull():label.setPixmap(pix.scaled(228,228,Qt.KeepAspectRatio,Qt.SmoothTransformation))
+            if not pix.isNull():
+                label.setPixmap(pix.scaled(228,228,Qt.KeepAspectRatio,Qt.SmoothTransformation));label.setToolTip('双击放大查看');label.setCursor(Qt.PointingHandCursor);label.activated.connect(lambda:self.show_image(relative))
         return label
+    def show_image(self,relative):
+        try:
+            d=ImageViewer(self.project.file(relative),QApplication.activeModalWidget() or self);d.setAttribute(Qt.WA_DeleteOnClose);d.show()
+        except Exception as e:message(self,e)
     def card(self,kind,item):
         box=QGroupBox(item['name']);box.setMinimumWidth(240)
         layout=QHBoxLayout(box)
@@ -298,7 +308,8 @@ class Studio(QMainWindow):
         affected=[s['name'] for s in self.project.data['shots'] if item['id'] in s['materials']]
         text='删除“'+item['name']+'”？素材文件和历史输出仍保留。'
         if affected:text+='\n同时解除以下分镜的素材引用，已有图片和视频保留：'+', '.join(affected)
-        if QMessageBox.question(self,'删除条目',text)!=QMessageBox.Yes:return
+        d=QMessageBox(QMessageBox.Question,'删除条目',text,QMessageBox.Yes|QMessageBox.No,self);d.button(QMessageBox.Yes).setText('确认删除');d.button(QMessageBox.No).setText('保留条目');d.setDefaultButton(QMessageBox.No)
+        if d.exec()!=QMessageBox.Yes:return
         try:
             self.project.delete(item['id'],detach=True)
             self.context_ids=[i for i in self.context_ids if i!=item['id']]
@@ -311,7 +322,7 @@ class Studio(QMainWindow):
         d=QDialog(self);d.setWindowTitle('编辑条目');f=QFormLayout(d);name=QLineEdit(item['name'] if item else '');desc=QPlainTextEdit(item['description'] if item else '')
         if kind!='shots':f.addRow('名称',name)
         f.addRow('描述',desc)
-        bb=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel);bb.accepted.connect(d.accept);bb.rejected.connect(d.reject);f.addRow(bb)
+        bb=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel);bb.button(QDialogButtonBox.Cancel).setText('取消');bb.button(QDialogButtonBox.Ok if bb.button(QDialogButtonBox.Ok) else QDialogButtonBox.Save).setText('保存');bb.accepted.connect(d.accept);bb.rejected.connect(d.reject);f.addRow(bb)
         if d.exec():
             if item:item.update(name=name.text() or '未命名',description=desc.toPlainText());self.project.mark_dependents(item['id'])
             else:self.project.add(kind,name.text(),desc.toPlainText())
@@ -326,7 +337,7 @@ class Studio(QMainWindow):
         d=QDialog(self);d.setWindowTitle('关联素材');v=QVBoxLayout(d);checks=[]
         for a in self.project.data['characters']+self.project.data['scenes']:
             cb=QCheckBox(a['name']);cb.setChecked(a['id'] in item['materials']);v.addWidget(cb);checks.append((a['id'],cb))
-        bb=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel);bb.accepted.connect(d.accept);bb.rejected.connect(d.reject);v.addWidget(bb)
+        bb=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel);bb.button(QDialogButtonBox.Cancel).setText('取消');bb.button(QDialogButtonBox.Ok if bb.button(QDialogButtonBox.Ok) else QDialogButtonBox.Save).setText('保存');bb.accepted.connect(d.accept);bb.rejected.connect(d.reject);v.addWidget(bb)
         if d.exec():item['materials']=[i for i,c in checks if c.isChecked()];self.save();self.refresh()
     def versions(self,item):
         d=QDialog(self);d.setWindowTitle(item['name']+' · 生成历史');d.resize(820,650);v=QVBoxLayout(d);ls=QListWidget();v.addWidget(ls)
@@ -353,7 +364,10 @@ class Studio(QMainWindow):
             records=QPlainTextEdit('\n'.join(j.get('created','')[:19]+' · '+j['generation']['mode']+' · '+j['status']+' · '+j.get('error','')[:200] for j in pending));records.setReadOnly(True);records.setMaximumHeight(100);v.addWidget(records)
         def preview():
             x=selected()
-            if x:QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.project.file(x['file']))))
+            if x:
+                if x['kind']=='image':self.show_image(x['file'])
+                else:self.play(x['file'])
+        ls.itemDoubleClicked.connect(lambda _:preview())
         def restore():
             x=selected()
             if x:item[x['kind']]=x['file'];self.project.mark_dependents(item['id']);self.save();d.accept();self.refresh()
@@ -437,7 +451,7 @@ class Studio(QMainWindow):
         url=QLineEdit(self.settings.value('comfy','http://127.0.0.1:8188'));model=QComboBox();model.addItems([self.model_picker.itemText(i) for i in range(self.model_picker.count())]);model.setCurrentText(self.model_picker.currentText());key=QLineEdit();key.setEchoMode(QLineEdit.Password);key.setPlaceholderText('留空保留现有密钥；保存到 Windows 凭据管理器')
         f.addRow('ComfyUI 地址',url);f.addRow('DeepSeek 模型',model);f.addRow('DeepSeek API Key',key)
         f.addRow(QLabel('对话会将故事、条目描述和相对文件名发送给 DeepSeek；不上传图片像素。'))
-        bb=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel);bb.accepted.connect(d.accept);bb.rejected.connect(d.reject);f.addRow(bb)
+        bb=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel);bb.button(QDialogButtonBox.Cancel).setText('取消');bb.button(QDialogButtonBox.Ok if bb.button(QDialogButtonBox.Ok) else QDialogButtonBox.Save).setText('保存');bb.accepted.connect(d.accept);bb.rejected.connect(d.reject);f.addRow(bb)
         if d.exec():
             try:
                 if key.text():keyring.set_password('AIStoryStudio','deepseek',key.text().strip())
@@ -455,21 +469,34 @@ class Studio(QMainWindow):
         self.model_picker.blockSignals(False);self.settings.setValue('model_list',models);self.settings.setValue('model',self.model_picker.currentText());self.agent_status.setText('账户模型列表已更新')
     def models_finished(self):
         self.model_worker.deleteLater();self.model_worker=None;self.model_refresh.setEnabled(True)
+    def chat_link(self,url):
+        if url.scheme()=='xychat':
+            try:index=int(url.path().split('/')[-1])
+            except ValueError:return
+            if index in self.chat_expanded:self.chat_expanded.remove(index)
+            else:self.chat_expanded.add(index)
+            self.render_chat();self.transcript.scrollToAnchor('message-'+str(index))
+        elif safe_link(url.toString()):QDesktopServices.openUrl(url)
+    def jump_user(self,index):
+        target=self.my_messages.itemData(index)
+        if target is not None:self.transcript.scrollToAnchor('message-'+str(target))
+    def chat_latest(self):
+        bar=self.transcript.verticalScrollBar();bar.setValue(bar.maximum())
     def render_chat(self):
-        def markup(text):
-            escaped=html.escape(text)
-            return re.sub(r'\[([^\]]+)\]\((https?://[^\s)]+)\)',lambda m:'<a href="'+m[2]+'">'+m[1]+'</a>' if safe_link(html.unescape(m[2])) else m[0],escaped).replace('\n','<br>')
-        self.transcript.clear()
-        if self.project:
-            for m in self.project.data['chat']:
-                if m.get('content') and m['role']!='tool':self.transcript.append(markup(('你：' if m['role']=='user' else 'AI：')+m['content']))
-                for a in m.get('_activity',[]):
-                    if a['type']=='skill':self.transcript.append(markup('已读取技能：'+a['skill']+'/'+a['file']))
-                    elif a['type']=='search':
-                        self.transcript.append(markup('已联网检索：'+a['query']))
-                        for source in a['sources'][:5]:
-                            if safe_link(source['url']):self.transcript.append('<a href="'+html.escape(source['url'],quote=True)+'">'+html.escape(source['title'])+'</a>')
-                    elif a['type']=='error':self.transcript.append(markup('工具未完成：'+a['message']))
+        messages=self.project.data['chat'] if self.project else []
+        project_id=self.project.data['id'] if self.project else None
+        if getattr(self,'chat_project_id',None)!=project_id:
+            self.chat_expanded.clear();self.chat_render_key=None;self.chat_project_id=project_id
+        rendered,users=transcript_html(messages,self.chat_expanded)
+        key=(project_id,rendered)
+        if key==self.chat_render_key:return
+        previous=self.transcript.verticalScrollBar().value();old_count=getattr(self,'chat_message_count',0)
+        self.transcript.setHtml(rendered);self.chat_render_key=key;self.chat_message_count=len(messages)
+        self.my_messages.blockSignals(True);self.my_messages.clear();self.my_messages.addItem('定位我的消息…',None)
+        for index,title in users:self.my_messages.addItem(title,index)
+        self.my_messages.blockSignals(False)
+        if len(messages)!=old_count and users:self.transcript.scrollToAnchor('message-'+str(users[-1][0]))
+        else:self.transcript.verticalScrollBar().setValue(previous)
     def send_chat(self):
         if not self.project or self.chat_worker:return
         text=self.input.toPlainText().strip()
@@ -478,34 +505,62 @@ class Studio(QMainWindow):
             key=keyring.get_password('AIStoryStudio','deepseek')
             if not key:raise ValueError('请先在设置中填写 DeepSeek API Key；目前可手动创建素材和生成。')
         except Exception as e:message(self,e);return
-        self.project.data['chat'].append({'role':'user','content':text});self.save();self.input.clear();self.render_chat();self.send.setEnabled(False)
+        self.project.data['chat'].append({'role':'user','content':text});self.save();self.input.clear();self.render_chat();self.chat_rounds=0;self.start_chat_request(key)
+    def start_chat_request(self,key=None):
+        key=key or keyring.get_password('AIStoryStudio','deepseek')
+        self.send.setEnabled(False);self.chat_continue=False;self.chat_rounds+=1
         context=copy.deepcopy({k:self.project.data[k] for k in ('story','characters','scenes','shots')});context['selected_ids']=list(self.context_ids)
         history=copy.deepcopy(self.project.data['chat']);model=self.model_picker.currentText();online=self.online.isChecked()
         self.chat_worker=Worker(lambda w:chat(key,model,history,context,online=online,notify=w.progress.emit))
         self.chat_worker.progress.connect(self.agent_status.setText)
         self.chat_worker.result.connect(self.chat_result);self.chat_worker.failed.connect(lambda e:message(self,e));self.chat_worker.finished.connect(self.chat_finished);self.chat_worker.start()
-    def chat_finished(self):self.chat_worker.deleteLater();self.chat_worker=None;self.send.setEnabled(True);self.agent_status.setText('本轮结束 · 技能按需读取')
+    def chat_finished(self):
+        if self.applying_chat:
+            self.chat_finish_pending=True;return
+        if not self.chat_worker:return
+        self.chat_finish_pending=False
+        self.chat_worker.deleteLater();self.chat_worker=None
+        if self.chat_continue and self.chat_rounds<4:
+            self.agent_status.setText('操作完成，AI 正在继续处理你的要求…');self.start_chat_request();return
+        self.send.setEnabled(True);self.agent_status.setText('达到连续操作上限，请继续对话' if self.chat_continue else '本轮结束 · 请查看操作结果')
     def chat_result(self,msg):
+        self.applying_chat=True
+        try:self.apply_chat_result(msg)
+        finally:
+            self.applying_chat=False
+            if self.chat_finish_pending:QTimer.singleShot(0,self.chat_finished)
+    def apply_chat_result(self,msg):
         self.project.data['chat'].append(msg)
-        calls=msg.get('tool_calls',[]);created={}
+        calls=msg.get('tool_calls',[]);created={};all_applied=bool(calls);had_generation=False
+        self.render_chat()
         for call in calls:
             name=call['function']['name'];args=json.loads(call['function']['arguments']);result='用户未采用此建议'
-            try:args=resolve_target(name,args,calls,created)
+            try:args=resolve_target(name,args,calls,created,self.project.data["characters"]+self.project.data["scenes"]+self.project.data["shots"])
             except ValueError as e:
                 result='操作未执行：'+str(e)
                 self.project.data['chat'].append({'role':'tool','tool_call_id':call['id'],'content':result})
-                message(self,e);continue
-            d=QMessageBox(self);d.setWindowTitle('AI 操作建议');d.setText(name);d.setInformativeText(json.dumps(args,ensure_ascii=False,indent=2));d.setStandardButtons(QMessageBox.Apply|QMessageBox.Cancel)
-            if d.exec()==QMessageBox.Apply:
+                all_applied=False;message(self,e);continue
+            title={'add_item':'创建条目','update_item':'修改条目','set_story':'保存故事','generate':'生成图片 / 视频'}.get(name,name)
+            approved=name=='generate'
+            if not approved:
+                d=QMessageBox(self);d.setWindowTitle('确认 AI 操作');d.setText(title+'：'+args.get('name',''))
+                d.setInformativeText(args.get('description',args.get('text',''))[:1200]);d.setDetailedText(json.dumps(args,ensure_ascii=False,indent=2));d.setStandardButtons(QMessageBox.Apply|QMessageBox.Cancel)
+                d.button(QMessageBox.Apply).setText('确认'+title);d.button(QMessageBox.Cancel).setText('取消本次操作')
+                approved=d.exec()==QMessageBox.Apply
+            if approved:
                 try:
                     result=self.apply_action(name,args)
+                    if name=='generate':had_generation=True
                     if name=='add_item':
                         created[call['id']]=json.loads(result)['id']
                         alias=args['name']
                         matching=[c for c in calls if c['function']['name']=='add_item' and json.loads(c['function']['arguments']).get('name')==alias]
                         if alias and len(matching)==1:created[alias]=json.loads(result)['id']
-                except Exception as e:result='操作失败：'+str(e);message(self,e)
-            self.project.data['chat'].append({'role':'tool','tool_call_id':call['id'],'content':result})
+                except Exception as e:all_applied=False;result='操作失败：'+str(e);message(self,e)
+            else:all_applied=False
+            display=('已创建：'+args['name']) if name=='add_item' and call['id'] in created else result
+            self.project.data['chat'].append({'role':'tool','tool_call_id':call['id'],'content':result,'_display':display})
+        self.chat_continue=all_applied and not had_generation and bool(self.chat_worker)
         self.save();self.refresh()
     def import_agent(self):
         if not self.project or self.chat_worker:return
@@ -535,7 +590,7 @@ class Studio(QMainWindow):
             self.project.mark_dependents(item['id']);self.save();return '条目已更新'
         if name=='generate':
             item=self.project.get(args['target']);job=self.generate(item,args['mode'],Generation(mode=args['mode'],prompt=args['prompt'],references=args['references'],megapixels=.2 if args['mode'].startswith('h3') else 1,seconds=2))
-            return '已加入队列，任务 '+job['id']+'；尚未完成生成' if job else '用户取消了生成，未提交任务'
+            return '已加入队列：'+item['name']+'，任务 '+job['id']+'；尚未完成生成' if job else '用户取消了生成，未提交任务'
     def closeEvent(self,event):
         if self.busy():message(self,'仍有任务运行，请等待完成或在任务记录中取消后关闭。');event.ignore();return
         self.save();event.accept()
@@ -545,6 +600,8 @@ def main():
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('XiYi.XYStudio')
     app=QApplication(sys.argv);app.setStyle('Fusion');app.setApplicationName('XY Studio')
+    app.zh_translator=QTranslator(app)
+    if app.zh_translator.load(str(Path(__file__).parent/'assets'/'qtbase_zh_CN.qm')):app.installTranslator(app.zh_translator)
     app.setWindowIcon(QIcon(str(Path(__file__).parent/'assets'/'xy-studio.ico')))
     app.setStyleSheet('QGroupBox{font-weight:600;margin-top:12px;padding:12px;border:1px solid #b7bcc6;border-radius:6px} QPushButton{padding:7px} QTabBar::tab{padding:12px 32px} QTextEdit,QPlainTextEdit{font-size:14px}')
     window=Studio(sys.argv[1] if len(sys.argv)>1 else None);window.show();return app.exec()

@@ -2,7 +2,7 @@
 import copy
 
 
-def resolve_target(name, args, calls, created):
+def resolve_target(name, args, calls, created, existing=()):
     args = copy.deepcopy(args)
     if name not in ('generate', 'update_item'):
         return args
@@ -11,8 +11,14 @@ def resolve_target(name, args, calls, created):
     if target.startswith('@'):
         call_id = target[1:]
         if call_id not in created:
-            raise ValueError('所引用的新条目尚未成功创建或已取消；没有提交生成。')
-        args[field] = created[call_id]
+            # A follow-up model response may retain the explicit name reference.
+            # Resolve only an exact, unique existing name, never in a create batch.
+            matches = [item for item in existing if item['name']==call_id]
+            if any(c['function']['name']=='add_item' for c in calls) or len(matches)!=1:
+                raise ValueError('所引用的新条目尚未成功创建或已取消，或名称不唯一；没有提交生成。')
+            args[field] = matches[0]['id']
+        else:
+            args[field] = created[call_id]
     elif any(c['function']['name'] == 'add_item' for c in calls):
         raise ValueError('同轮包含新建条目，不能猜测生成或修改归属。请用 @新条目名称 引用新条目，或下一轮单独操作已有条目。')
     if 'materials' in args:

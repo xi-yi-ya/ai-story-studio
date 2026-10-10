@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import uuid
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,10 +10,19 @@ def uid(): return uuid.uuid4().hex
 def now(): return datetime.now(timezone.utc).isoformat()
 def atomic_json(path, data):
     path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
-    tmp=path.with_suffix(path.suffix+'.tmp')
-    with tmp.open('w',encoding='utf-8') as f:
-        json.dump(data,f,ensure_ascii=False,indent=2); f.flush(); os.fsync(f.fileno())
-    os.replace(tmp,path)
+    tmp=path.with_name(path.name+'.'+uid()+'.tmp')
+    try:
+        with tmp.open('w',encoding='utf-8') as f:
+            json.dump(data,f,ensure_ascii=False,indent=2); f.flush(); os.fsync(f.fileno())
+        for attempt in range(20):
+            try:
+                os.replace(tmp,path);break
+            except PermissionError:
+                # Windows readers briefly deny replacement of the open journal.
+                if attempt==19:raise
+                time.sleep(.025)
+    finally:
+        if tmp.exists():tmp.unlink()
 
 class Project:
     def __init__(self, root, create=False):
