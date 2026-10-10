@@ -1,0 +1,11 @@
+{
+  "date": "2026-10-10T09:11:53.546Z",
+  "browser": "154.0.4258.62",
+  "builtApp": "http://127.0.0.1:4173",
+  "shotCount": 3,
+  "assetCount": 2,
+  "pageErrors": [],
+  "externalRequests": [],
+  "failedResponses": [],
+  "result": "passed"
+}
