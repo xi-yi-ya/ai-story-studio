@@ -107,3 +107,13 @@ def test_fixed_thumbnail_and_task_management(tmp_path):
     d.filter.setCurrentIndex(4);assert d.table.rowCount()==1
     d.pause();assert Project(p.root).data['queue_paused']
     d.close();thumb.deleteLater();w.close()
+
+def test_agent_controls_and_safe_source_links(tmp_path):
+    p=Project(tmp_path/'p',True)
+    p.data['chat']=[{'role':'assistant','content':'结果','_activity':[{'type':'search','query':'test','sources':[{'title':'来源 [一] <script>','url':'https://example.com/docs?q=1&x=2'},{'title':'不可打开','url':'file:///C:/private'}]}]}];p.save()
+    w=Studio(p.root)
+    assert w.model_picker.findText('deepseek-flash')>=0
+    text=w.transcript.toPlainText()
+    assert '来源 [一] <script>' in text and '不可打开' not in text
+    assert 'href="https://example.com/docs?q=1&amp;x=2"' in w.transcript.toHtml()
+    w.close()

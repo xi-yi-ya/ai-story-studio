@@ -1,5 +1,15 @@
 # v0.1.0 验证记录
 
+## 2026-10-10 v0.1.4 Agent 联网、模型和按需技能
+
+- 账户 `/models` 实测返回 deepseek-flash、deepseek-v4-pro；两个模型真实对话均通过。GUI“刷新模型”已实际点击并显示更新成功。
+- DeepSeek Anthropic 兼容搜索接口返回 server_tool_use 和 web_search_tool_result，主对话调用搜索后给出来源链接。请求只发送检索词，不附整个项目；不使用已被官方文档标为忽略的 Responses web_search。
+- 普通真实对话未读技能；Qwen 请求读取 SKILL.md 和 edit-guide.md，H3 参考模板请求读取 H3 SKILL.md 与 ref-en.txt。EXE 内真实对话再次读取 Qwen 两份文件并返回中文改图提示词，确认打包目录可用。
+- 离线覆盖目录而非全正文注入、按需读取及路径拒绝、只读与修改工具混合时延后修改、关闭联网拦截搜索、没有真实来源不能声称检索成功、HTML 转义与来源链接限制。
+- 真实验证仅覆盖有限查询；搜索可能失败或命中不相关来源。返回来源证明检索发生，不代表所有模型总结都准确。每轮最多 8 次主模型调用、3 次搜索调用，搜索使用同一 Key 并额外计费。
+- 生成流程未在此轮重新渲染。普通聊天、检索和技能测试均在隔离项目，原项目未改写。完整联网与 Qwen 报告 local-data/agent-v014-live-report.json，H3 报告 local-data/agent-v014-live-report-h3.json，仅保留本机。
+- 接口依据：[DeepSeek 模型列表](https://api-docs.deepseek.com/api/list-models/)、[DeepSeek 联网检索说明](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code/#using-web-search-in-claude-code)、[Anthropic 兼容接口](https://api-docs.deepseek.com/guides/anthropic_api/)、[Responses 兼容限制](https://api-docs.deepseek.com/guides/responses_api/)。
+
 ## 2026-10-10 v0.1.3 进度、任务管理和提示词验证
 
 - 37 项离线检查通过，新增覆盖：按 prompt_id 排除其他任务进度、节点采样完成不等于保存完成、固定预览尺寸、任务筛选/取消/暂停持久化、旧项目提示词回填和切换模式保留窗口草稿。

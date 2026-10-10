@@ -1,16 +1,17 @@
-import copy,json,os,sys
+import copy,json,os,sys,html,re
 from dataclasses import asdict
 from pathlib import Path
 import keyring
 from PySide6.QtCore import Qt,QThread,Signal,QUrl,QSettings,QTimer
 from PySide6.QtGui import QPixmap,QDesktopServices,QAction,QIcon
-from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QPushButton,QLabel,QLineEdit,QTextEdit,QPlainTextEdit,QTabWidget,QScrollArea,QGroupBox,QDialog,QFormLayout,QComboBox,QDoubleSpinBox,QSpinBox,QCheckBox,QDialogButtonBox,QFileDialog,QMessageBox,QInputDialog,QMenu,QDockWidget,QListWidget,QListWidgetItem,QAbstractItemView,QProgressBar,QTableWidget,QTableWidgetItem,QHeaderView)
+from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QPushButton,QLabel,QLineEdit,QTextEdit,QPlainTextEdit,QTabWidget,QScrollArea,QGroupBox,QDialog,QFormLayout,QComboBox,QDoubleSpinBox,QSpinBox,QCheckBox,QDialogButtonBox,QFileDialog,QMessageBox,QInputDialog,QMenu,QDockWidget,QListWidget,QListWidgetItem,QAbstractItemView,QTextBrowser,QProgressBar,QTableWidget,QTableWidgetItem,QHeaderView)
 from PySide6.QtMultimedia import QMediaPlayer,QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from .storage import Project,uid,now,atomic_json
 from .workflows import Generation,MODES,RATIOS,STYLES,resolution,frames
 from .comfy import Comfy,execute
-from .deepseek import chat,validate_action
+from .deepseek import chat,validate_action,list_models,DEFAULT_MODELS
+from .research import safe_link
 from .media import video_poster
 from . import __version__
 
@@ -171,7 +172,7 @@ class TaskDialog(QDialog):
 
 class Studio(QMainWindow):
     def __init__(self,project_path=None):
-        super().__init__();self.settings=QSettings('XiYi','AIStoryStudio');self.project=None;self.active=None;self.chat_worker=None;self.context_ids=[]
+        super().__init__();self.settings=QSettings('XiYi','AIStoryStudio');self.project=None;self.active=None;self.chat_worker=None;self.model_worker=None;self.context_ids=[]
         self.jobs_dialog=None
         self.progress_bar=QProgressBar();self.progress_bar.setMinimumWidth(360);self.statusBar().addPermanentWidget(self.progress_bar)
         self.task_timer=QTimer(self);self.task_timer.timeout.connect(self.update_task_status);self.task_timer.start(700)
@@ -181,7 +182,15 @@ class Studio(QMainWindow):
         for title,fn in [('新建项目',self.new_project),('打开项目',self.open_project),('保存',self.save),('设置',self.configure),('任务管理',self.show_jobs),('AI 对话',self.toggle_chat)]:
             a=QAction(title,self);a.triggered.connect(fn);toolbar.addAction(a)
         self.dock=QDockWidget('AI 创作助手 · DeepSeek',self);self.dock.setMinimumWidth(300)
-        chatbox=QWidget();cl=QVBoxLayout(chatbox);self.transcript=QTextEdit();self.transcript.setReadOnly(True);cl.addWidget(self.transcript)
+        chatbox=QWidget();cl=QVBoxLayout(chatbox)
+        options=QHBoxLayout();self.model_picker=QComboBox();self.model_picker.addItems(self.settings.value('model_list',DEFAULT_MODELS,type=list))
+        current=self.settings.value('model','deepseek-flash')
+        if self.model_picker.findText(current)<0:self.model_picker.addItem(current)
+        self.model_picker.setCurrentText(current);self.model_picker.currentTextChanged.connect(lambda m:self.settings.setValue('model',m))
+        options.addWidget(self.model_picker);self.model_refresh=button('刷新模型',self.refresh_models);options.addWidget(self.model_refresh);cl.addLayout(options)
+        self.online=QCheckBox('允许 AI 联网检索');self.online.setChecked(self.settings.value('online_search',True,type=bool));self.online.toggled.connect(lambda value:self.settings.setValue('online_search',value));cl.addWidget(self.online)
+        self.agent_status=QLabel('技能按需读取 · 联网使用同一 DeepSeek Key');self.agent_status.setWordWrap(True);cl.addWidget(self.agent_status)
+        self.transcript=QTextBrowser();self.transcript.setOpenLinks(False);self.transcript.anchorClicked.connect(lambda url:QDesktopServices.openUrl(url) if safe_link(url.toString()) else None);cl.addWidget(self.transcript)
         self.context_label=QLabel('右击素材卡可发送给 AI');self.context_label.setWordWrap(True);cl.addWidget(self.context_label)
         self.input=QPlainTextEdit();self.input.setMaximumHeight(120);self.input.setPlaceholderText('描述故事或修改目标……');cl.addWidget(self.input)
         self.send=button('发送',self.send_chat);cl.addWidget(self.send)
@@ -189,7 +198,7 @@ class Studio(QMainWindow):
         self.dock.setWidget(chatbox);self.addDockWidget(Qt.RightDockWidgetArea,self.dock)
         if project_path:self.load_project(project_path)
         else:self.refresh()
-    def busy(self):return bool(self.active or self.chat_worker)
+    def busy(self):return bool(self.active or self.chat_worker or self.model_worker)
     def guard(self):
         if self.busy():message(self,'任务运行期间请等待完成再切换项目');return False
         return True
@@ -422,20 +431,42 @@ class Studio(QMainWindow):
         self.context_label.setText('发送上下文：'+', '.join(self.project.get(i)['name'] for i in self.context_ids));self.dock.show()
     def configure(self):
         d=QDialog(self);d.setWindowTitle('设置');f=QFormLayout(d)
-        url=QLineEdit(self.settings.value('comfy','http://127.0.0.1:8188'));model=QLineEdit(self.settings.value('model','deepseek-flash'));key=QLineEdit();key.setEchoMode(QLineEdit.Password);key.setPlaceholderText('留空保留现有密钥；保存到 Windows 凭据管理器')
+        url=QLineEdit(self.settings.value('comfy','http://127.0.0.1:8188'));model=QComboBox();model.addItems([self.model_picker.itemText(i) for i in range(self.model_picker.count())]);model.setCurrentText(self.model_picker.currentText());key=QLineEdit();key.setEchoMode(QLineEdit.Password);key.setPlaceholderText('留空保留现有密钥；保存到 Windows 凭据管理器')
         f.addRow('ComfyUI 地址',url);f.addRow('DeepSeek 模型',model);f.addRow('DeepSeek API Key',key)
         f.addRow(QLabel('对话会将故事、条目描述和相对文件名发送给 DeepSeek；不上传图片像素。'))
         bb=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel);bb.accepted.connect(d.accept);bb.rejected.connect(d.reject);f.addRow(bb)
         if d.exec():
             try:
                 if key.text():keyring.set_password('AIStoryStudio','deepseek',key.text().strip())
-                self.settings.setValue('comfy',url.text().strip());self.settings.setValue('model',model.text().strip())
+                self.settings.setValue('comfy',url.text().strip());self.model_picker.setCurrentText(model.currentText())
             except Exception as e:message(self,e)
+    def refresh_models(self):
+        if self.model_worker:return
+        key=keyring.get_password('AIStoryStudio','deepseek')
+        if not key:message(self,'请先在设置中保存 DeepSeek API Key');return
+        self.model_refresh.setEnabled(False);self.agent_status.setText('正在读取账户可用模型……')
+        self.model_worker=Worker(lambda w:list_models(key));self.model_worker.result.connect(self.models_loaded);self.model_worker.failed.connect(lambda e:message(self,e));self.model_worker.finished.connect(self.models_finished);self.model_worker.start()
+    def models_loaded(self,models):
+        current=self.model_picker.currentText();self.model_picker.blockSignals(True);self.model_picker.clear();self.model_picker.addItems(models)
+        if current in models:self.model_picker.setCurrentText(current)
+        self.model_picker.blockSignals(False);self.settings.setValue('model_list',models);self.settings.setValue('model',self.model_picker.currentText());self.agent_status.setText('账户模型列表已更新')
+    def models_finished(self):
+        self.model_worker.deleteLater();self.model_worker=None;self.model_refresh.setEnabled(True)
     def render_chat(self):
+        def markup(text):
+            escaped=html.escape(text)
+            return re.sub(r'\[([^\]]+)\]\((https?://[^\s)]+)\)',lambda m:'<a href="'+m[2]+'">'+m[1]+'</a>' if safe_link(html.unescape(m[2])) else m[0],escaped).replace('\n','<br>')
         self.transcript.clear()
         if self.project:
             for m in self.project.data['chat']:
-                if m.get('content') and m['role']!='tool':self.transcript.append(('你：' if m['role']=='user' else 'AI：')+m['content'])
+                if m.get('content') and m['role']!='tool':self.transcript.append(markup(('你：' if m['role']=='user' else 'AI：')+m['content']))
+                for a in m.get('_activity',[]):
+                    if a['type']=='skill':self.transcript.append(markup('已读取技能：'+a['skill']+'/'+a['file']))
+                    elif a['type']=='search':
+                        self.transcript.append(markup('已联网检索：'+a['query']))
+                        for source in a['sources'][:5]:
+                            if safe_link(source['url']):self.transcript.append('<a href="'+html.escape(source['url'],quote=True)+'">'+html.escape(source['title'])+'</a>')
+                    elif a['type']=='error':self.transcript.append(markup('工具未完成：'+a['message']))
     def send_chat(self):
         if not self.project or self.chat_worker:return
         text=self.input.toPlainText().strip()
@@ -445,10 +476,12 @@ class Studio(QMainWindow):
             if not key:raise ValueError('请先在设置中填写 DeepSeek API Key；目前可手动创建素材和生成。')
         except Exception as e:message(self,e);return
         self.project.data['chat'].append({'role':'user','content':text});self.save();self.input.clear();self.render_chat();self.send.setEnabled(False)
-        context={k:self.project.data[k] for k in ('story','characters','scenes','shots')};context['selected_ids']=self.context_ids
-        self.chat_worker=Worker(lambda w:chat(key,self.settings.value('model','deepseek-flash'),copy.deepcopy(self.project.data['chat']),context))
+        context=copy.deepcopy({k:self.project.data[k] for k in ('story','characters','scenes','shots')});context['selected_ids']=list(self.context_ids)
+        history=copy.deepcopy(self.project.data['chat']);model=self.model_picker.currentText();online=self.online.isChecked()
+        self.chat_worker=Worker(lambda w:chat(key,model,history,context,online=online,notify=w.progress.emit))
+        self.chat_worker.progress.connect(self.agent_status.setText)
         self.chat_worker.result.connect(self.chat_result);self.chat_worker.failed.connect(lambda e:message(self,e));self.chat_worker.finished.connect(self.chat_finished);self.chat_worker.start()
-    def chat_finished(self):self.chat_worker.deleteLater();self.chat_worker=None;self.send.setEnabled(True)
+    def chat_finished(self):self.chat_worker.deleteLater();self.chat_worker=None;self.send.setEnabled(True);self.agent_status.setText('本轮结束 · 技能按需读取')
     def chat_result(self,msg):
         self.project.data['chat'].append(msg)
         for call in msg.get('tool_calls',[]):

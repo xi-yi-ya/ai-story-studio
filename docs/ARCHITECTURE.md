@@ -10,4 +10,8 @@ GUI（Qt 主线程）负责项目变更和审阅；推理 worker 使用项目快
 
 `deepseek.py` 官方 chat/completions + tools。AI 只能提出 set_story / add_item / update_item / generate，字段校验且需 GUI 审阅。它不能执行系统命令或删除任意文件。2026-10-09 已验证真实 API 文本及多轮工具消息，下一轮可以引用上一轮已完成图片的实际路径；并非自动执行未来输出依赖的任务图。
 
+v0.1.4：在项目操作外增加只读 read_skill 和 web_search。初始提示词只带技能目录，允许读取白名单内的独立技能文件；技能正文保留在本轮临时消息中。联网使用 DeepSeek Anthropic 兼容 `/anthropic/v1/messages` 的服务端搜索，并由主对话整理有来源的回答；不假设 Responses API 会执行 web_search。工具循环最多 8 次主对话请求、3 次搜索调用。只读操作与项目操作混在一轮时，先返回资料，要求模型重新提出修改，原 GUI 审阅边界不变。日志记录已读文件与实际搜索来源，不保存密钥。
+
+模型通过 `/models` 获取，GUI 提供缓存列表及手动异步刷新；请求开始时固定模型、联网开关与项目快照。来源链接仅允许 HTTP/HTTPS，渲染前转义 HTML，不允许链接执行本地文件或脚本。
+
 与原工作流差异：Qwen 常规 8-bit PNG 保存；Qwen 编辑新增 VAE 和有序图像引用及确定性几何处理；四视图使用 source_image、VAE、target_latent 路径减少中途 VAE 换入，输出尺寸改为 GUI 选择；RFMSR 直接保存结果，省略 UI 清理/预览；H3 时长在客户端用相同表达式算好。明确排除独立电影工作流及断开的 Turbo/放大节点。
