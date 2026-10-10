@@ -288,7 +288,7 @@ onMounted(() => {
           </button>
           <div class="workspace-signature">
             <span class="tiny-logo">XY</span
-            ><span>让故事，发生。<small>Workbench / v0.3.0</small></span>
+            ><span>让故事，发生。<small>Workbench / v{{store.state?.version}}</small></span>
           </div>
         </div>
       </nav>
@@ -590,7 +590,7 @@ onMounted(() => {
         </div>
         <TimelinePanel v-if="store.page === 'shots'" @locate="locate" />
         <footer v-else class="workspace-bottom">
-          <span>XY Studio · v0.3.0</span
+          <span>XY Studio · v{{store.state?.version}}</span
           ><span>{{ store.project.name }} / 项目文件存储</span>
         </footer>
       </main>

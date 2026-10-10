@@ -9,7 +9,7 @@ try{
  await p.getByRole('button',{name:'发送消息',exact:true}).click();
  await p.waitForFunction(()=>!document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('studio').busy,{}, {timeout:180000});
  const s=await rpc('bootstrap');const message=s.project.chat.at(-1);
- if(message.role!=='assistant' || !message.text.includes('1'))throw Error('Packaged DeepSeek response missing');
- await fs.writeFile('../local-data/v030-packaged-agent.json',JSON.stringify({model:s.config.model,keyAvailable:s.config.keySet,message,passed:true},null,2));
+ if(message.role!=='assistant' || (!message.text.includes('1') || !message.text.includes(before.project.name)))throw Error('Packaged DeepSeek response missing');
+ await fs.writeFile('../local-data/v031-packaged-agent.json',JSON.stringify({model:s.config.model,keyAvailable:s.config.keySet,message,passed:true},null,2));
  console.log('PACKAGED REAL DEEPSEEK PASSED',s.config.model);
 }finally{await rpc('settings.save',{model:before.config.model,online:before.config.online});await b.close()}

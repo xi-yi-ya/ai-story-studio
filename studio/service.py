@@ -368,7 +368,7 @@ class StudioService(QObject):
             raise ValueError('请先在设置中填写 DeepSeek API Key')
         p = self.require_project()
         self.rounds += 1
-        context = copy.deepcopy({k:p.data[k] for k in ('story', 'characters', 'scenes', 'shots')})
+        context = copy.deepcopy({k:p.data[k] for k in ('id', 'title', 'story', 'characters', 'scenes', 'shots')})
         context['selected_ids'] = list(dict.fromkeys(([self.selected] if self.selected else [])+self.context_ids))
         history = copy.deepcopy(p.data['chat'])
         model = self.settings.value('model', DEFAULT_MODELS[0])

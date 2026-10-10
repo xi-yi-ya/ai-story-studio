@@ -128,7 +128,7 @@ test('1920/2K/4K and browser zoom keep media, chat and navigation usable',async(
  await page.evaluate(()=>document.documentElement.style.zoom='1.25');
  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBeTruthy();
  await page.evaluate(()=>document.documentElement.style.zoom='1');
- await page.screenshot({path:'../docs/screenshots/v030-storyboard.png'});
+ await page.screenshot({path:process.env.XY_SCREENSHOT || '../docs/screenshots/v030-storyboard.png'});
 });
 test('many real shot cards and empty search do not break the workbench',async()=>{
  await rpc('project.open',{path:root});

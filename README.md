@@ -1,17 +1,19 @@
-# XY Studio — v0.3.0
+# XY Studio — v0.3.1
 
 面向个人短故事创作者的 Windows 桌面工作台。Vue 3 是唯一正式界面，以 QWebEngineView + QWebChannel 连接原有 Python 后端；调用本机 ComfyUI，DeepSeek 用于对话、故事组织和生成建议。
 
 ## 启动
 
 1. 启动已安装节点和模型的 ComfyUI，默认 `http://127.0.0.1:8188`。
-2. 双击 `releases/v0.3.0/XY-Studio/XY-Studio.exe`。发布包需保留整个 XY-Studio 文件夹，不能只复制 EXE。
+2. 双击 `releases/v0.3.1/XY-Studio/XY-Studio.exe`。发布包需保留整个 XY-Studio 文件夹，不能只复制 EXE。
 3. 新建空项目文件夹，或打开已有 `project.json`。项目可放在任意可写目录。
 4. 在设置中填 DeepSeek API Key（可以暂时不填，手工生成正常使用）。密钥存入 Windows 凭据管理器，不写入项目或 Git。
 
 源码运行：Python 3.12，安装 `requirements.txt`，执行 `npm --prefix frontend ci` 和 `npm --prefix frontend run build`，再运行 `python main.py`。本机已创建 `.venv`，可运行 `run.ps1`。构建 Windows 包：`scripts/build.ps1`；不覆盖已有版本目录。开发测试：`python -m pytest tests --basetemp local-data/pytest-local`（仅用此专用临时目录）。
 
 ## 使用
+
+v0.3.1：Agent 上下文包含真实项目标题和 ID；正式版本号由后端提供。交付说明见 [v0.3.1](docs/RELEASE-v0.3.1.md)。
 
 v0.3.0：正式迁移到已验收的 Vue 工作台。项目、角色、场景、逐镜头历史、时间轴、图片/视频预览、完整生成参数、参考排序、任务取消/恢复、DeepSeek 多轮审阅、模型选择、联网与按需 Skill 均接真实服务，无 Mock 回退。原 Python 业务模块、schema=1、资产 ID、API Key 存储和工作流配置保留。H3 原视频不改写；后台缓存 VP9/Opus 兼容预览，保留画面与声音。v0.2.0 EXE 和旧源码保留用于回退，不作为正式入口。架构、实测与已知边界见 [迁移说明](docs/MIGRATION-v0.3.0.md)。
 
