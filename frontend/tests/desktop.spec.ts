@@ -24,29 +24,29 @@ test.afterAll(async()=>{if(original)await rpc('project.open',{path:original});aw
 test.afterEach(async()=>{
  expect(await page.evaluate(()=>(document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('studio').connectionError)).toBe('');
 });
-test('new empty project, role and scene edit/import are persisted',async()=>{
- await page.getByRole('button',{name:'角色资产',exact:true}).click();
- await page.getByRole('button',{name:'创建角色',exact:true}).click();
- await page.getByLabel('名称',{exact:true}).fill('Vue 测试角色');
- await page.getByLabel('描述',{exact:true}).fill('测试角色描述');
- await page.getByRole('button',{name:'确认创建',exact:true}).click();
- actor=(await state()).project.assets[0].id;
- await page.getByRole('button',{name:'场景资产',exact:true}).click();
- await page.getByRole('button',{name:'创建场景',exact:true}).click();
- await page.getByLabel('名称',{exact:true}).fill('Vue 测试场景');
- await page.getByLabel('描述',{exact:true}).fill('测试场景描述');
- await page.getByRole('button',{name:'确认创建',exact:true}).click();
- scene=(await state()).project.assets.find((a:any)=>a.kind==='scenes').id;
+test('new empty project, role and scene adoption and name edits persist',async()=>{
  const reference=path.join(legacyRoot,'assets/b1463e53334345328a91dc047816aec3.png');
- await rpc('asset.import',{id:actor,paths:[reference]});await rpc('asset.import',{id:scene,paths:[reference]});
+ await rpc('library.import',{kind:'image',paths:[reference]});
+ for(const [nav,name] of [['角色资产','Vue 测试角色'],['场景资产','Vue 测试场景']]){
+  await page.getByRole('button',{name:nav,exact:true}).click();
+  await page.getByRole('button',{name:nav==='角色资产'?'添加角色':'添加场景',exact:true}).click();
+  await page.getByRole('button',{name:'选用这张图片',exact:true}).first().click();
+  await page.getByLabel('素材名称',{exact:true}).fill(name!);
+  await expect(page.getByLabel('描述',{exact:true})).toHaveCount(0);
+  await page.getByRole('button',{name:'确认添加',exact:true}).click();
+ }
+ actor=(await state()).project.assets.find((a:any)=>a.kind==='characters').id;
+ scene=(await state()).project.assets.find((a:any)=>a.kind==='scenes').id;
  expect(JSON.parse(await fs.readFile(path.join(root,'project.json'),'utf8')).schema).toBe(1);
  await page.getByRole('button',{name:'角色资产',exact:true}).click();
  const card=page.getByTestId('asset-'+actor);await card.click({button:'right'});
- await page.getByRole('menuitem',{name:'编辑资料'}).click();
- await page.getByLabel('名称',{exact:true}).fill('Vue 角色改名');await page.getByLabel('描述',{exact:true}).fill('长描述。'.repeat(120));
+ await page.getByRole('menuitem',{name:'修改名称'}).click();
+ await page.getByLabel('名称',{exact:true}).fill('Vue 角色改名');
  await page.getByRole('button',{name:'保存修改',exact:true}).click();
  expect((await state()).project.assets.find((a:any)=>a.id===actor).name).toBe('Vue 角色改名');
+ await expect(card.locator('.asset-description')).toHaveCount(0);
 });
+
 test('double click image, zoom, history and right-click context',async()=>{
  const card=page.getByTestId('asset-'+actor);
  await card.locator('.asset-image').dblclick();await expect(page.getByRole('dialog')).toBeVisible();
@@ -89,7 +89,7 @@ test('shot numbering, real associations, timeline, folding and media mode bounda
  await card.getByRole('button',{name:'选择素材Vue 角色改名',exact:true}).click();expect((await state()).selectedId).toBeNull();
  await page.getByRole('button',{name:'折叠镜头1',exact:true}).click();await expect(page.getByTestId('shot-'+shot).locator('.shot-body')).toHaveCount(0);
  await page.getByRole('button',{name:/定位镜头1/}).click();await expect(page.getByTestId('shot-'+shot).locator('.shot-body')).toBeVisible();
- await page.getByTestId('shot-'+shot).getByRole('button',{name:'生成图片',exact:true}).click();
+ await page.locator('.topbar').getByRole('button',{name:'生成图片',exact:true}).click();
  const imageModes=await page.getByLabel('生成工作流').locator('option').evaluateAll(o=>o.map(v=>(v as HTMLOptionElement).value));
  expect(imageModes).toContain('upscale');expect(imageModes.every(v=>!v.startsWith('h3'))).toBeTruthy();
  await page.getByLabel('生成工作流').selectOption('upscale');await expect(page.getByLabel('放大倍数')).toBeVisible();await expect(page.getByLabel('H3 时长')).toHaveCount(0);
@@ -99,7 +99,7 @@ test('shot numbering, real associations, timeline, folding and media mode bounda
  await page.getByLabel('生成工作流').selectOption('krea');await expect(page.getByLabel('采样步数',{exact:true})).toHaveValue('8');
  await page.getByLabel('生成工作流').selectOption('qwen');await expect(page.getByLabel('采样步数',{exact:true})).toHaveValue('24');
  await page.getByRole('button',{name:'取消生成',exact:true}).click();
- await page.getByTestId('shot-'+shot).getByRole('button',{name:'生成视频',exact:true}).click();
+ await page.locator('.topbar').getByRole('button',{name:'生成视频',exact:true}).click();
  const videoModes=await page.getByLabel('生成工作流').locator('option').evaluateAll(o=>o.map(v=>(v as HTMLOptionElement).value));
  expect(videoModes).toHaveLength(4);expect(videoModes.every(v=>v.startsWith('h3'))).toBeTruthy();
  await expect(page.getByLabel('H3 时长')).toBeVisible();await expect(page.getByLabel('放大倍数')).toHaveCount(0);
@@ -107,7 +107,7 @@ test('shot numbering, real associations, timeline, folding and media mode bounda
 });
 test('queue parameters and cancellation persist, last prompt restored, no fake progress',async()=>{
  await rpc('queue.toggle');
- await page.getByTestId('shot-'+shot).getByRole('button',{name:'生成图片',exact:true}).click();
+ await page.locator('.topbar').getByRole('button',{name:'生成图片',exact:true}).click();
  await expect(page.getByLabel('采样步数',{exact:true})).toHaveValue('40');
  const initialSeed=await page.getByLabel('种子',{exact:true}).inputValue();
  await page.getByRole('button',{name:'换一个随机种子',exact:true}).click();
@@ -118,13 +118,13 @@ test('queue parameters and cancellation persist, last prompt restored, no fake p
  await page.getByRole('button',{name:'加入生成队列',exact:true}).click();
  let s=await state();expect(s.project.tasks[0].status).toBe('new');expect(s.project.tasks[0].progress).toBeNull();expect(s.project.tasks[0].generation.seed).toBe('9223372036854775807');
  expect(s.project.tasks[0].generation.steps).toBe(40);
- await expect(page.getByTestId('shot-'+shot).getByRole('progressbar')).toBeVisible();
- await expect(page.getByTestId('shot-'+shot).getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
- await expect(page.getByTestId('shot-'+shot)).toContainText('等待执行 · 队列已暂停');
+ await expect(page.locator('.active-generation').getByRole('progressbar')).toBeVisible();
+ await expect(page.locator('.active-generation').getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
+ await expect(page.locator('.active-generation')).toContainText('等待执行 · 队列已暂停');
  await page.getByRole('button',{name:'任务与历史',exact:true}).click();
  for(const bar of await page.getByRole('progressbar').all())await expect(bar).not.toHaveAttribute('aria-valuenow');
  await page.getByRole('button',{name:'取消',exact:true}).click();expect((await state()).project.tasks[0].status).toBe('cancelled');
- await page.getByRole('button',{name:'分镜工作区',exact:true}).click();await page.getByTestId('shot-'+shot).getByRole('button',{name:'生成图片',exact:true}).click();
+ await page.getByRole('button',{name:'分镜工作区',exact:true}).click();await page.locator('.topbar').getByRole('button',{name:'生成图片',exact:true}).click();
  await expect(page.getByLabel('生成提示词')).toHaveValue('界面测试提示词，实际加入暂停队列');await page.getByRole('button',{name:'取消生成',exact:true}).click();
  await page.getByRole('button',{name:/保存项目/}).click();
  await rpc('project.open',{path:original});await rpc('project.open',{path:root});
@@ -202,7 +202,7 @@ test('AI review and legacy activity records use readable Chinese without interna
  await rpc('project.open',{path:root});
  const s=await state();const bundle=path.join(root,'readable-review.json');
  const content='将为你创建一个小型舞台。\n'+JSON.stringify({type:'skill',skill:'h3',file:'SKILL.md'});
- await fs.writeFile(bundle,JSON.stringify({project_id:s.project.id,provider:'UI regression fixture',message:{role:'assistant',content,_activity:[{type:'skill',skill:'h3',file:'SKILL.md'},{type:'search',sources:[{title:'参考来源测试',url:'https://example.com/'}]}],tool_calls:[{id:'readable-create',type:'function',function:{name:'add_item',arguments:JSON.stringify({kind:'scenes',name:'非技术用户验收舞台',description:'安静的小舞台，暖色灯光。'})}}]}}));
+ await fs.writeFile(bundle,JSON.stringify({project_id:s.project.id,provider:'UI regression fixture',message:{role:'assistant',content,_activity:[{type:'skill',skill:'h3',file:'SKILL.md'},{type:'search',sources:[{title:'参考来源测试',url:'https://example.com/'}]}],tool_calls:[{id:'readable-create',type:'function',function:{name:'add_item',arguments:JSON.stringify({kind:'scenes',name:'非技术用户验收舞台',description:'',file:s.project.assets[0].imageFile})}}]}}));
  await rpc('agent.import',{path:bundle});
  await expect(page.locator('.assistant-panel')).not.toContainText('SKILL.md');
  await expect(page.locator('.assistant-panel')).not.toContainText('"type"');
@@ -211,13 +211,13 @@ test('AI review and legacy activity records use readable Chinese without interna
  await expect(page.locator('.review-fields')).toContainText('创建类型');
  await expect(page.locator('.review-fields')).toContainText('场景');
  await expect(page.getByRole('dialog')).not.toContainText('"kind"');
- await page.getByRole('button',{name:'确认创建条目',exact:true}).click();
+ await page.getByRole('button',{name:'确认添加条目',exact:true}).click();
  await expect(page.locator('.assistant-panel')).toContainText('已创建：非技术用户验收舞台');
  const stored=JSON.parse(await fs.readFile(path.join(root,'project.json'),'utf8'));
  expect(stored.chat.find((m:any)=>m.content?.includes('将为你创建一个小型舞台'))?.content).toContain('SKILL.md');
 });
 test('real generated task history shows its own images and video poster',async()=>{
- const report=JSON.parse(await fs.readFile(`../local-data/${validationVersion}-progress-report.json`,'utf8'));
+ const report=JSON.parse(await fs.readFile(process.env.XY_HISTORY_REPORT || '../local-data/v111-progress-report.json','utf8'));
  expect(report.passed).toBeTruthy();await rpc('project.open',{path:report.project});
  await page.getByRole('button',{name:'任务与历史',exact:true}).click();
  const s=await state();expect(s.project.tasks).toHaveLength(5);
@@ -280,17 +280,20 @@ test('complete image library paginates all originals and restores generated hist
  expect(history).toBeTruthy();
  const card=page.getByTestId('library-'+history.id);
  await expect.poll(()=>card.locator('img').evaluate((image:HTMLImageElement)=>image.naturalWidth)).toBeGreaterThan(0);
- await card.getByRole('button',{name:'查看详情',exact:true}).click();
+ await card.getByRole('button',{name:'查看记录',exact:true}).click();
  await expect(page.getByRole('dialog')).toContainText(history.prompt);
  await page.getByRole('button',{name:'放大预览',exact:true}).click();await expect(page.locator('.preview-toolbar')).toBeVisible();await page.keyboard.press('Escape');
  await card.getByRole('button',{name:'发送给 AI',exact:true}).click();
  expect((await state()).mediaContext[0].file).toBe(history.file);
  await page.getByRole('button',{name:/移除AI素材引用/}).click();expect((await state()).mediaContext).toEqual([]);
- await card.getByRole('button',{name:'查看详情',exact:true}).click();
+ await card.getByRole('button',{name:'查看记录',exact:true}).click();
  await page.getByRole('button',{name:history.owners[0].name,exact:true}).click();
  const origin=page.getByTestId('asset-'+history.owners[0].id);await expect(origin).toHaveClass(/selected/);
- await origin.getByRole('button',{name:'生成新版本',exact:true}).click();
+ await page.locator('.topbar').getByRole('button',{name:'生成图片',exact:true}).click();
  await page.getByLabel('生成工作流').selectOption('qwen_edit');
+ while(await page.getByRole('button',{name:'移除参考图',exact:true}).count())await page.getByRole('button',{name:'移除参考图',exact:true}).first().click();
+ await page.getByLabel('选择项目参考图').selectOption((await state()).project.assets.find((a:any)=>a.id===history.owners[0].id).imageFile);
+ await page.getByRole('button',{name:'加入参考',exact:true}).click();
  await expect(page.getByLabel('使用本机 INT8 模型')).toBeChecked();
  await expect(page.getByLabel('编辑输出尺寸')).toHaveValue('source');
  await page.getByRole('button',{name:'从图片库选择',exact:true}).click();
@@ -298,14 +301,14 @@ test('complete image library paginates all originals and restores generated hist
  await page.getByTestId('library-'+history.id).getByRole('button',{name:'选用这张图片',exact:true}).click();
  await expect(page.locator('.choose-library')).toHaveCount(0);
  // The appended row is an exact historical reference; backend validation returns the same real dimensions.
- await expect(page.locator('.reference-row')).toHaveCount(2);
+ await expect(page.locator('.reference-image-row')).toHaveCount(2);
  await page.getByLabel('编辑输出尺寸').selectOption('custom');await expect(page.getByLabel('分辨率 MP')).toBeVisible();
  await page.getByRole('button',{name:'取消生成',exact:true}).click();
  await page.getByRole('button',{name:'图片库',exact:true}).click();
  await page.getByLabel('图片归属筛选').selectOption('deleted');await expect(page.locator('.library-card')).toHaveCount(1);
  await expect(page.locator('.library-card')).toContainText('条目已删除');
  await page.getByLabel('图片归属筛选').selectOption('all');
- await page.getByLabel('搜索图片资产').fill('绝对不存在的素材');await expect(page.getByText('没有找到图片素材',{exact:true})).toBeVisible();
+ await page.getByLabel('搜索图片资产').fill('绝对不存在的素材');await expect(page.getByText('没有找到匹配的图片',{exact:true})).toBeVisible();
  await page.getByRole('button',{name:'清除筛选',exact:true}).click();
  await expect(page.locator('.library-card')).toHaveCount(24);
  for(const [width,height] of [[1920,1080],[2560,1440],[3840,2160],[1024,768]]){

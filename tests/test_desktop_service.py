@@ -208,6 +208,8 @@ def test_task_result_thumbnails_keep_each_output_after_version_changes_and_delet
         j=s.project.data['jobs'][-1]
         relative=f'outputs/{job}.png';Image.new('RGB',(32,32),color).save(s.project.file(relative))
         j.update(status='completed',outputs=[relative]);s.project.attach_output(j,relative)
+        if color=='red': assert s.project.get(target)['image']==''
+        call(s,'asset.use_media',id=target,file=relative)
     item=s.project.get(target)
     call(s,'version.use',id=target,version=item['versions'][0]['id'])
     tasks=s.snapshot()['project']['tasks']
@@ -253,6 +255,9 @@ def test_journal_recovery_keeps_results_under_original_id(service, tmp_path):
         job=call(s,'generation.submit',target=ident,generation=asdict(Generation(prompt=ident)))
         rel=f'outputs/{job}.png';Image.new('RGB',(32,32),'green').save(s.project.file(rel))
         data=s.project.data['jobs'][-1].copy();data.update(status='completed',prompt_id=job,outputs=[rel])
+        # An actual old journal must keep its owner during replay. New jobs are
+        # deliberately unassigned until the user adopts their results.
+        data['target']=ident
         atomic_json(s.project.file('jobs/'+job+'.json'),data)
     root=s.project.root
     s.load(tmp_path/'other',create=True);s.load(root)
@@ -265,13 +270,13 @@ def test_journal_recovery_keeps_results_under_original_id(service, tmp_path):
 def test_review_create_alias_rejection_and_one_shot_approval(service):
     s=service;s.project.data['queue_paused']=True
     old=call(s,'asset.add',kind='characters',name='旧角色')
-    calls=[{'id':'create','type':'function','function':{'name':'add_item','arguments':json.dumps({'kind':'characters','name':'新角色','description':'描写'})}},
+    calls=[{'id':'create','type':'function','function':{'name':'add_item','arguments':json.dumps({'kind':'shots','name':'新角色','description':'描写'})}},
            {'id':'gen','type':'function','function':{'name':'generate','arguments':json.dumps({'target':'@新角色','mode':'qwen','prompt':'a simple robot','references':[]})}}]
     s._accept_message({'role':'assistant','content':'建议','tool_calls':calls})
     first=s.pending['id'];call(s,'review.respond',id=first,accepted=True)
     target=s.pending['targetId'];assert target!=old
     second=s.pending['id'];call(s,'review.respond',id=second,accepted=True)
-    assert s.project.data['jobs'][-1]['target']==target
+    assert s.project.data['jobs'][-1]['target']=='__library__'
     with pytest.raises(ValueError):call(s,'review.respond',id=second,accepted=True)
     assert len(s.project.data['jobs'])==1
     s._accept_message({'role':'assistant','content':'建议','tool_calls':calls})
@@ -283,6 +288,7 @@ def test_recovery_never_resubmits_without_known_id_and_delete_guard(service):
     s=service;s.project.data['queue_paused']=True
     target=call(s,'asset.add',kind='scenes',name='场景')
     job=call(s,'generation.submit',target=target,generation=asdict(Generation(prompt='scene')))
+    s.project.data['jobs'][-1]['target']=target  # Existing pending legacy job.
     with pytest.raises(ValueError):call(s,'asset.delete',id=target)
     with pytest.raises(ValueError):call(s,'task.resume',id=job)
     assert s.project.data['jobs'][0]['status']=='new'
@@ -291,10 +297,12 @@ def test_recovery_never_resubmits_without_known_id_and_delete_guard(service):
 
 def test_video_asset_guard_and_path_escape(service):
     s=service;target=call(s,'asset.add',kind='characters',name='人物')
-    with pytest.raises(ValueError):call(s,'generation.submit',target=target,generation=asdict(Generation(mode='h3_t2v',prompt='video')))
+    s.project.data['queue_paused']=True
+    call(s,'generation.submit',target=target,generation=asdict(Generation(mode='h3_t2v',prompt='video')))
     with pytest.raises(ValueError):s.media_url('../secret.png')
     with pytest.raises(ValueError):call(s,'asset.link',id=target,ids=[])
-    assert not s.project.data['jobs']
+    assert s.project.data['jobs'][0]['target']=='__library__'
+    assert s.project.get(target)['video']==''
 
 
 def test_media_server_token_range_and_no_business_http(service, tmp_path):

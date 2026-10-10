@@ -11,6 +11,7 @@ from pathlib import Path
 
 import av
 from PIL import Image
+from .storage import LIBRARY_TARGET
 
 IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp'}
 VIDEO_SUFFIXES = {'.mp4', '.webm', '.mkv'}
@@ -79,14 +80,18 @@ class AssetLibrary:
                 r['source'] = 'generated'
                 if job['id'] not in r['jobs']: r['jobs'].append(job['id'])
                 r['prompt'] = r['prompt'] or job.get('generation', {}).get('prompt', '')
-                target = items.get(job.get('target'))
+                target = items.get(job.get('target')) if not job.get('library_only') else None
                 if target:
                     owner = {'id': target[1]['id'], 'name': target[1]['name'], 'kind': target[0]}
                     if owner not in r['owners']: r['owners'].append(owner)
                     if r['name'].startswith('未关联'): r['name'] = owner['name']+' · 生成结果'
-                else:
+                elif job.get('target') != LIBRARY_TARGET and not job.get('library_only'):
                     r['deletedOwner'] = True
                     if r['name'].startswith('未关联'): r['name'] = '已删除条目的生成结果'
+                if job.get('target') == LIBRARY_TARGET or job.get('library_only'):
+                    r['name'] = job.get('name') or ('视频' if r['kind']=='video' else '图片')
+                    if len(job.get('outputs', [])) > 1:
+                        r['name'] += ' · '+str(job['outputs'].index(relative)+1)
         # Imported references may never have been assigned to a card. Retained
         # outputs may outlive their original item or version index.
         for name in ('assets', 'outputs'):
@@ -98,6 +103,8 @@ class AssetLibrary:
                     entry((Path(folder)/name).relative_to(p.root).as_posix())
         counts = {}
         for r in sorted(records.values(), key=lambda r:r['file']):
+            if r['file'] in p.data.get('media_names', {}):
+                r['name'] = p.data['media_names'][r['file']]
             if r['name'] in ('未关联图片','未关联视频','已删除条目的生成结果'):
                 label = r['name']; counts[label] = counts.get(label, 0)+1
                 r['name'] = label+' '+str(counts[label])
@@ -135,4 +142,9 @@ class AssetLibrary:
         record = next((r for r in self.inventory() if r['file'] == relative), None)
         if not record or not record['exists']:
             raise ValueError('该素材不存在或不属于当前项目素材库')
+        try:
+            file=self.project.file(record['file']);stat=file.stat()
+            _metadata(str(file),stat.st_size,stat.st_mtime_ns)
+        except (OSError,ValueError,av.error.FFmpegError,IndexError) as e:
+            raise ValueError('素材无法读取，请检查原文件或重新导入') from e
         return record

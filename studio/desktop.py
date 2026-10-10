@@ -15,6 +15,7 @@ from PySide6.QtWebChannel import QWebChannel
 from .service import StudioService
 from .media_server import MediaServer
 from . import __version__
+from .file_drop import NativeFileDrop
 
 
 class Bridge(QObject):
@@ -86,6 +87,8 @@ class Desktop(QMainWindow):
         self.page.scripts().insert(script)
         self.view = QWebEngineView(self)
         self.view.setPage(self.page)
+        self.file_drops = NativeFileDrop(self.view)
+        QApplication.instance().installEventFilter(self.file_drops)
         self.setCentralWidget(self.view)
         self.service.exit_requested.connect(self.close)
         self.service.changed.connect(self.title_from_state)
@@ -107,6 +110,7 @@ class Desktop(QMainWindow):
                 event.ignore()
                 return
             self.stopped = True
+            QApplication.instance().removeEventFilter(self.file_drops)
             self.view.stop()
             self.server.close()
             self.view.setPage(None)

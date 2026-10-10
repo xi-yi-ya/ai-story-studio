@@ -8,6 +8,7 @@ from pathlib import Path
 
 def uid(): return uuid.uuid4().hex
 def now(): return datetime.now(timezone.utc).isoformat()
+LIBRARY_TARGET = '__library__'
 def atomic_json(path, data):
     path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
     tmp=path.with_name(path.name+'.'+uid()+'.tmp')
@@ -59,7 +60,9 @@ class Project:
         if not path.is_file(): raise ValueError('素材不存在')
         dest=self.root/'assets'/f'{uid()}{path.suffix.lower()}'
         shutil.copy2(path,dest)
-        return dest.relative_to(self.root).as_posix()
+        relative = dest.relative_to(self.root).as_posix()
+        self.data.setdefault('media_names', {})[relative] = path.stem
+        return relative
 
     def add(self,kind,name,description='',image=''):
         if kind not in ('characters','scenes','shots'): raise ValueError('未知素材类型')
@@ -98,6 +101,9 @@ class Project:
         self.save()
 
     def attach_output(self,job,relative):
+        # New requests belong to the library. Legacy jobs retain their original
+        # associations during replay so opening old projects remains lossless.
+        if job.get('target') == LIBRARY_TARGET or job.get('library_only'): return
         try: item=self.get(job['target'])
         except ValueError: return
         if any(v.get('job')==job['id'] and v['file']==relative for v in item['versions']): return
@@ -107,3 +113,19 @@ class Project:
         item['versions'].append(version); item[media]=relative
         self.mark_dependents(item['id'])
         self.save()
+
+    def use_media(self, ident, record):
+        """Adopt a library original without copying or changing its identity."""
+        item = self.get(ident)
+        media, relative = record['kind'], record['file']
+        if not self.file(relative).is_file(): raise ValueError('素材原文件不存在')
+        version = next((v for v in item['versions'] if v['file'] == relative and v['kind'] == media), None)
+        if version is None:
+            job = next((j for j in self.data['jobs'] if j['id'] in record['jobs']), None)
+            version = {'id':uid(), 'time':now(), 'kind':media, 'file':relative,
+                       'intent':record.get('prompt') or '选用素材库图片', 'materials':[], 'adopted':True}
+            if job: version['job'] = job['id']
+            item['versions'].append(version)
+        item[media] = relative
+        self.mark_dependents(ident)
+        return version['id']

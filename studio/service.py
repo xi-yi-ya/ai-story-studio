@@ -17,7 +17,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog
 
 from . import __version__
-from .storage import Project, atomic_json, uid, now
+from .storage import Project, atomic_json, uid, now, LIBRARY_TARGET
 from .workflows import Generation, MODES, RATIOS, STYLES, resolution, frames, new_seed, default_steps
 from .comfy import Comfy, execute
 from .deepseek import chat, list_models, DEFAULT_MODELS, validate_action
@@ -128,6 +128,8 @@ class StudioService(QObject):
                     atomic_json(self.project.file('jobs/'+j['id']+'.json'), j)
                 for relative in outputs:
                     self.project.attach_output(j, relative)
+                if outputs:
+                    self.notify('已保存到'+('视频库' if j['generation']['mode'].startswith('h3') else '图片库')+'，请选择满意的结果添加到资产或分镜。')
             else:
                 journal = self.project.file('jobs/'+j['id']+'.json')
                 if journal.exists():
@@ -260,7 +262,10 @@ class StudioService(QObject):
         if model not in models:
             models.append(model)
         config = {'comfy': self.settings.value('comfy', 'http://127.0.0.1:8188'), 'model': model, 'models': models, 'online': self.settings.value('online_search', True, type=bool), 'keySet': bool(keyring.get_password('AIStoryStudio', 'deepseek'))}
-        state = {'version': __version__, 'config': config, 'catalog': {'modes': MODES, 'ratios': RATIOS, 'styles': STYLES, 'skills': CATALOG}, 'recent': self.recent, 'selectedId': self.selected, 'contextIds': list(self.context_ids), 'mediaContext': copy.deepcopy(self.media_context), 'activeJob': self.active['id'] if self.active else None, 'busy': bool('chat' in self.workers or self.batch or self.pending), 'modelsBusy': 'models' in self.workers, 'status': public_status(self.status), 'error': self.last_error, 'review': self.pending, 'project': None}
+        attachments = []
+        for media in self.media_context:
+            attachments.append(dict(media, media=self.media_url(media['file']) if media['kind']=='image' else ''))
+        state = {'version': __version__, 'config': config, 'catalog': {'modes': MODES, 'ratios': RATIOS, 'styles': STYLES, 'skills': CATALOG}, 'recent': self.recent, 'selectedId': self.selected, 'contextIds': list(self.context_ids), 'mediaContext': attachments, 'activeJob': self.active['id'] if self.active else None, 'busy': bool('chat' in self.workers or self.batch or self.pending), 'modelsBusy': 'models' in self.workers, 'status': public_status(self.status), 'error': self.last_error, 'review': self.pending, 'project': None}
         if not self.project:
             return state
         p = self.project
@@ -310,7 +315,7 @@ class StudioService(QObject):
             try:
                 target_name = p.get(j['target'])['name']
             except ValueError:
-                target_name = '已删除条目'
+                target_name = j.get('name', '素材库生成') if j.get('target')==LIBRARY_TARGET else '已删除条目'
             progress = j.get('progress')
             results = []
             for index, relative in enumerate(j.get('outputs', [])):
@@ -324,10 +329,9 @@ class StudioService(QObject):
         return state
 
     def _generation(self, target, value):
-        item = self.require_project().get(target)
+        self.require_project()
+        item = self.project.get(target) if target and target != LIBRARY_TARGET else None
         g = self.parse_generation(value)
-        if g.mode.startswith('h3') and not any(s['id'] == target for s in self.project.data['shots']):
-            raise ValueError('视频只能在分镜中生成')
         if g.mode in ('qwen', 'krea', 'h3_t2v'):
             g.references = []
         g.validate()
@@ -338,23 +342,31 @@ class StudioService(QObject):
                 raise ValueError('此工作流只支持图片参考，视频不能作为参考图')
         return item, g
 
-    def defaults(self, target, mode=None):
-        item = self.require_project().get(target)
+    def defaults(self, target=None, mode=None, kind='image'):
+        p = self.require_project()
+        item = p.get(target) if target and target != LIBRARY_TARGET else None
+        history = [j for j in reversed(p.data['jobs']) if (j['generation']['mode'].startswith('h3') == (kind=='video'))]
         if mode is None:
-            mode = 'qwen_edit' if item['image'] else 'qwen'
-        refs = [item['image']] if item['image'] and mode in ('h3_i2v', 'upscale', 'quad', 'qwen_edit') else []
-        return self.wire_generation(asdict(Generation(mode=mode, prompt=self.project.last_prompt(target, mode) or item['description'], references=refs, seed=new_seed(), steps=default_steps(mode), megapixels=.2 if mode.startswith('h3') else 6.6 if mode=='qwen' else 1, seconds=2 if mode.startswith('h3') else 5, qwen_int8=mode=='qwen_edit')))
+            mode = ('qwen_edit' if item['image'] else 'qwen') if item else history[0]['generation']['mode'] if history else 'h3_i2v' if kind=='video' else 'qwen'
+        previous = next((j for j in reversed(p.data['jobs']) if j['generation']['mode']==mode and (not item or j.get('origin_target',j['target'])==target)), None)
+        if previous:
+            g = dict(previous['generation'], edit_follow_source=previous.get('edit_follow_source',False), seed=new_seed())
+            return self.wire_generation(g)
+        refs = [item['image']] if item and item['image'] and mode in ('h3_i2v', 'upscale', 'quad', 'qwen_edit') else []
+        return self.wire_generation(asdict(Generation(mode=mode, prompt=item['description'] if item else '', references=refs, seed=new_seed(), steps=default_steps(mode), megapixels=.2 if mode.startswith('h3') else 6.6 if mode=='qwen' else 1, seconds=2 if mode.startswith('h3') else 5, qwen_int8=mode=='qwen_edit')))
 
-    def submit(self, target, generation):
+    def submit(self, target, generation, name=''):
         item, g = self._generation(target, generation)
         # Resolve the legacy 0 sentinel before journaling. Do not re-randomize
         # reviewed seeds here: retries and recovery must reproduce this request.
         g.steps = g.steps or default_steps(g.mode)
         parameters = asdict(g)
         parameters.pop('edit_follow_source')
-        j = {'id': uid(), 'target': target, 'generation': parameters, 'materials': copy.deepcopy([self.project.get(i) for i in item['materials']]), 'status': 'new', 'created': now()}
+        kind = '视频' if g.mode.startswith('h3') else '图片'
+        number = 1+sum(j.get('target')==LIBRARY_TARGET and j['generation']['mode'].startswith('h3')==g.mode.startswith('h3') for j in self.project.data['jobs'])
+        j = {'id': uid(), 'target': LIBRARY_TARGET, 'name': name.strip()[:100] or f'{kind} {number}', 'generation': parameters, 'materials': [], 'status': 'new', 'created': now()}
+        if item: j['origin_target'] = item['id']
         if g.mode=='qwen_edit': j['edit_follow_source'] = g.edit_follow_source
-        item.setdefault('last_prompts', {})[g.mode] = g.prompt
         self.project.data['jobs'].append(j)
         self.save()
         self.start_next()
@@ -372,6 +384,11 @@ class StudioService(QObject):
             raise ValueError('已有任务在查询或生成中')
         self.active = job
         self.job_stop = threading.Event()
+        # Resuming an unfinished old job also follows explicit adoption. Its
+        # existing ID/target are retained as provenance, not a write destination.
+        if job.get('target') != LIBRARY_TARGET:
+            job['library_only'] = True
+            self.project.save()
         p = Project(self.project.root)
         snapshot = copy.deepcopy(job)
         client = Comfy(self.settings.value('comfy', 'http://127.0.0.1:8188'))
@@ -415,16 +432,24 @@ class StudioService(QObject):
                 name = call['function']['name']
                 args = json.loads(call['function']['arguments'])
                 validate_action(name, args)
-                args = resolve_target(name, args, b['calls'], b['created'], self.project.data['characters']+self.project.data['scenes']+self.project.data['shots'])
+                if name != 'generate':
+                    args = resolve_target(name, args, b['calls'], b['created'], self.project.data['characters']+self.project.data['scenes']+self.project.data['shots'])
                 if name not in ('add_item', 'update_item', 'set_story', 'generate'):
                     raise ValueError('此工具不是可执行项目操作')
-                pending = {'id': uid(), 'name': name, 'args': args, 'title': {'add_item':'创建条目', 'update_item':'修改条目', 'set_story':'保存故事', 'generate':'生成图片 / 视频'}[name]}
+                pending = {'id': uid(), 'name': name, 'args': args, 'title': {'add_item':'添加条目', 'update_item':'修改条目', 'set_story':'保存故事', 'generate':'生成视频' if args.get('mode','').startswith('h3') else '生成图片'}[name]}
                 if name == 'generate':
-                    target = self.project.get(args['target'])
-                    g = self.parse_generation(self.defaults(target['id'],args['mode']))
+                    if args.get('target','').startswith('@') and any(c['function']['name']=='add_item' for c in b['calls']):
+                        # Legacy dependent suggestions still respect a rejected
+                        # creation, although approved output now goes to the library.
+                        resolve_target(name, args, b['calls'], b['created'])
+                    g = self.parse_generation(self.defaults(mode=args['mode']))
                     g.prompt, g.references = args['prompt'], args['references']
-                    self._generation(target['id'], asdict(g))
-                    pending.update(targetId=target['id'], targetName=target['name'], generation=self.wire_generation(asdict(g)))
+                    self._generation(None, asdict(g))
+                    pending.update(targetId=LIBRARY_TARGET, targetName='视频库' if g.mode.startswith('h3') else '图片库', generation=self.wire_generation(asdict(g)))
+                elif name == 'add_item' and args['kind'] != 'shots':
+                    record = AssetLibrary(self.project).get(args.get('file',''))
+                    if record['kind'] != 'image': raise ValueError('角色和场景请从图片库选择图片')
+                    pending['media'] = {'file':record['file'], 'name':record['name'], 'url':self.media_url(record['file'])}
                 self.pending = pending
                 self.status = '等待审阅：'+pending['title']
                 self.save()
@@ -452,11 +477,13 @@ class StudioService(QObject):
         result = '用户取消本次操作，未执行'
         if accepted:
             if name == 'generate':
-                job = self.submit(args['target'], generation or pending['generation'])
+                job = self.submit(None, generation or pending['generation'])
                 result = '已加入队列：'+pending['targetName']+'，任务 '+job+'；尚未完成生成'
                 b['generated'] = True
             elif name == 'add_item':
-                item = self.project.add(args['kind'], args['name'], args['description'])
+                record = AssetLibrary(self.project).get(args['file']) if args['kind'] != 'shots' else None
+                item = self.project.add(args['kind'], args['name'] or (record['name'] if record else ''), args['description'] if args['kind']=='shots' else '')
+                if record: self.project.use_media(item['id'], record)
                 result = json.dumps(item, ensure_ascii=False)
                 b['created'][call['id']] = item['id']
                 matches = [c for c in b['calls'] if c['function']['name']=='add_item' and json.loads(c['function']['arguments']).get('name') == args['name']]
@@ -476,7 +503,7 @@ class StudioService(QObject):
             b['all_applied'] = False
         display = '已创建：'+args['name'] if name=='add_item' and accepted else result
         if name=='generate' and accepted:
-            display = '已将「'+pending['targetName']+'」加入生成队列，完成后可在生成历史查看。'
+            display = '已加入生成队列，完成后保存到'+pending['targetName']+'，再由你选择使用。'
         self.project.data['chat'].append({'role':'tool', 'tool_call_id':call['id'], 'content':result, '_display': display})
         b['index'] += 1
         self.pending = None
@@ -550,20 +577,53 @@ class StudioService(QObject):
         if command == 'library.preview':
             r = AssetLibrary(p).get(a['file'])
             return self._version({'id':r['id'], 'file':r['file'], 'kind':r['kind'], 'time':r['time'], 'intent':r['prompt'], 'job':r['jobs'][0] if r['jobs'] else None})
+        if command == 'references.describe':
+            files = a['files']
+            if not isinstance(files,list) or len(files)>16 or any(not isinstance(f,str) for f in files): raise ValueError('参考素材列表无效')
+            records = {r['file']:r for r in AssetLibrary(p).inventory()}
+            result = []
+            for file in files:
+                original = p.file(file)
+                r = records.get(file)
+                exists = original.is_file() and original.suffix.lower() in IMAGE_SUFFIXES
+                result.append({'file':file,'name':r['name'] if r else original.name,'media':self.media_url(file) if exists else '', 'exists':exists})
+            return result
         if command == 'library.import':
             kind = a['kind']
-            if kind not in ('image','video'): raise ValueError('素材类型无效')
+            if kind not in ('image','video','auto'): raise ValueError('素材类型无效')
             paths = a.get('paths')
             if paths is None:
                 paths = QFileDialog.getOpenFileNames(self.parent(),'导入图片' if kind=='image' else '导入视频','','图片 (*.png *.jpg *.jpeg *.webp)' if kind=='image' else '视频 (*.mp4 *.webm *.mkv)')[0]
             if not isinstance(paths,list) or any(not isinstance(f,str) for f in paths): raise ValueError('请选择有效的素材文件')
             for source in paths:
                 file=Path(source)
-                if not file.is_file() or file.suffix.lower() not in (IMAGE_SUFFIXES if kind=='image' else VIDEO_SUFFIXES): raise ValueError('素材不存在或格式不受支持')
+                suffixes = IMAGE_SUFFIXES if kind=='image' else VIDEO_SUFFIXES if kind=='video' else IMAGE_SUFFIXES|VIDEO_SUFFIXES
+                if not file.is_file() or file.suffix.lower() not in suffixes: raise ValueError('素材不存在或格式不受支持，请导入图片或视频原文件')
                 stat=file.stat()
                 _metadata(str(file.resolve()),stat.st_size,stat.st_mtime_ns)
             imported=[p.import_file(source) for source in paths]
             self.save(); return imported
+        if command == 'asset.from_media':
+            if a['kind'] not in ('characters','scenes'): raise ValueError('请选择角色或场景')
+            record = AssetLibrary(p).get(a['file'])
+            if record['kind'] != 'image': raise ValueError('角色和场景请选用图片')
+            item = p.add(a['kind'], a.get('name','').strip() or record['name'])
+            p.use_media(item['id'], record)
+            self.save(); return item['id']
+        if command == 'asset.use_media':
+            item = p.get(a['id'])
+            record = AssetLibrary(p).get(a['file'])
+            if record['kind']=='video' and item not in p.data['shots']: raise ValueError('视频请添加到分镜')
+            version = p.use_media(item['id'], record)
+            self.save(); return version
+        if command == 'asset.rename':
+            item = p.get(a['id'])
+            name = a.get('name','').strip()
+            if not name:
+                try: name = AssetLibrary(p).get(item['image'])['name']
+                except ValueError: name = item['name']
+            item['name'] = name[:100]
+            p.mark_dependents(item['id']); self.save(); return True
         if command == 'context.add_media':
             r = AssetLibrary(p).get(a['file'])
             if not any(c['file']==r['file'] for c in self.media_context):
@@ -635,7 +695,7 @@ class StudioService(QObject):
             if not file.is_file(): raise ValueError('文件不存在')
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(file))); return True
         if command == 'generation.defaults':
-            return self.defaults(a['target'], a.get('mode'))
+            return self.defaults(a.get('target'), a.get('mode'), a.get('kind','image'))
         if command == 'generation.seed':
             return str(new_seed())
         if command == 'generation.preview':
@@ -653,7 +713,7 @@ class StudioService(QObject):
                 with Image.open(p.file(g.references[0])) as im: w, h = max(32,round(im.width/32)*32), max(32,round(im.height/32)*32)
             return {'width':w,'height':h,'frames':frames(g.seconds),'seconds':frames(g.seconds)/24,'steps':g.steps or default_steps(g.mode)}
         if command == 'generation.submit':
-            return self.submit(a['target'], a['generation'])
+            return self.submit(a.get('target'), a['generation'], a.get('name',''))
         if command == 'queue.toggle':
             p.data['queue_paused'] = not p.data.get('queue_paused', False); self.save(); self.start_next(); return True
         if command == 'task.cancel':

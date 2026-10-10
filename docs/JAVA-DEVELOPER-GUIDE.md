@@ -104,7 +104,9 @@ record Version(String id, String jobId, String kind,
 
 class Job {
     String id;                 // 这次生成的身份
-    String targetId;           // 生成结果属于哪个 Item
+    String targetId;           // 新任务固定为 __library__；旧任务保留原 Item ID
+    boolean libraryOnly;       // 恢复旧未完成任务时，保留 targetId 但输出仅入库
+    String name;               // 库中生成结果的显示名称
     Generation generation;
     String status;
     String promptId;           // ComfyUI 任务身份，与上面的 ID 不同
@@ -116,30 +118,47 @@ class Job {
 
 分镜编号只是显示顺序。删除镜头后“分镜 3”可以变成“分镜 2”，但真实 ID 保持不变。自定义镜头名称保存于 `original_name`，不用它来建立引用。
 
-### 3.1 生成结果归属
+### 3.1 生成与选用是两个独立操作（v1.2.0）
 
-核心是 `Project.attach_output(job, relative)`。它按照 **job.target** 查找条目，不读取当前 UI 选中了哪张卡片：
+新任务的 `job.target` 固定为 `__library__`。执行器只下载输出并记录 `job.outputs`；`Project.attach_output` 对新任务直接返回，不改变任何角色、场景或分镜。`AssetLibrary` 从任务、旧版本和原文件建立统一索引，因此未选用结果也能查询。
+
+用户确认选用时才调用 `asset.from_media` 或 `asset.use_media`。新建角色/场景继承库中素材名称，或使用用户填写的名称；选用不会复制原文件，也不改素材库身份。Java 对照：
 
 ```java
-// 核心逻辑对照；实际 Python 还保存时间、素材快照和项目。
-void attachOutput(Job job, String relativeFile) {
-    Item item = findById(job.targetId);
-    if (item == null) return; // 被删除条目不重新创建；任务记录仍保留输出
-    boolean exists = item.versions.stream().anyMatch(v ->
-        v.jobId().equals(job.id) && v.file().equals(relativeFile));
-    if (exists) return;       // 恢复查询再次登记时，不重复创建版本
+static final String LIBRARY_TARGET = "__library__";
 
-    boolean video = job.generation.mode.startsWith("h3");
-    item.versions.add(new Version(newId(), job.id,
-        video ? "video" : "image", relativeFile, job.generation.prompt));
-    if (video) item.video = relativeFile;
-    else item.image = relativeFile;
+// 生成完成：job.outputs 已由执行器登记。
+void onCompleted(Job job) {
+    if (!job.libraryOnly && !LIBRARY_TARGET.equals(job.targetId)) {
+        attachLegacyOutput(job); // 只兼容旧任务原归属，不读取当前 UI 选择
+    }
+    saveProject();
+    publishState();
+}
+
+// 用户明确选用：角色/场景只接收图片，分镜可接收图片或视频。
+String useMedia(String itemId, LibraryMedia media) {
+    Item item = findById(itemId);
+    validateOriginalExists(media.file());
+    validateMediaKind(item, media.kind());
+    Version version = item.versions.stream()
+        .filter(v -> v.file().equals(media.file()) && v.kind().equals(media.kind()))
+        .findFirst().orElse(null);
+    if (version == null) {
+        version = versionFromOriginal(media); // 保留原生成任务关联
+        item.versions.add(version);
+    }
+    if (media.kind().equals("video")) item.video = media.file();
+    else item.image = media.file();
     markDependentShotsForReview(item.id);
     saveProject();
+    return version.id();
 }
 ```
 
-这解释了之前“生成图片跑到测试角色 1”为什么是严重问题：界面选择可以变化，结果归属不能变化。历史页也必须读取每次 `job.outputs`；读取 `item.image` 只能得到当前选中的版本，无法代表过去那次生成。
+这里的 `LibraryMedia`、辅助方法是职责示例，不是已编译的 Java 后端。实际接口校验在 `StudioService.dispatch()`，登记在 `Project.use_media()`。再次选择同一文件复用原版本，不重复登记。
+
+旧 `job.target`、条目 ID 和已有版本不改写。打开旧项目时重放旧完成日志仍保持旧归属；恢复旧未完成任务时增加可选 `library_only=true`，保留原目标用于追溯，但后续新输出也只入库。打开新项目不会把未选用结果自动放入卡片。历史页始终从 `job.outputs` 找本次结果，不能拿卡片当前图片替代。
 
 ### 3.2 保存、路径和删除
 
@@ -160,7 +179,6 @@ Java 中相近的做法是临时文件、`FileChannel.force(true)` 和替换移�
   "id": "request-unique-id",
   "command": "generation.submit",
   "payload": {
-    "target": "existing-item-id",
     "generation": { "mode": "krea", "prompt": "..." }
   }
 }
@@ -196,14 +214,17 @@ Reply handle(Request request) {
 | `project.new / open` | `path` 可选；新建可带 `title` | 无路径时打开桌面文件选择器 |
 | `project.save / story / folder` | 故事带 `text` | 保存项目、修改故事、打开项目目录 |
 | `selection` | `id`、`toggle`、`pin`、`clear` 可选 | 选择或取消、固定 AI 上下文、清空上下文 |
-| `asset.add` | `kind`、`name`、`description` | 添加角色、场景或自动编号分镜 |
+| `asset.add` | `kind`、`name`、`description` | 自动编号分镜；旧接口兼容 |
+| `asset.from_media` | `kind`、`file`、可选 `name` | 用户从图片库添加角色/场景 |
+| `asset.use_media / rename` | `id`、`file` / `id`、`name` | 选用库中原文件 / 修改资产名称 |
 | `asset.update / delete / reviewed` | `id`；更新还带名称和描述 | 修改、删除、清除待检查标记 |
 | `asset.link` | `id`、`ids` | 分镜关联已有角色和场景 |
 | `asset.import` | `id`、`paths` 可选 | 导入图片并登记版本 |
 | `references.import` | `paths` 可选 | 导入生成用参考图，保留顺序 |
 | `version.use` | `id`、`version` | 切换当前图片或视频，旧历史不变 |
-| `generation.defaults / preview` | 目标和模式 / 完整生成参数 | 读默认值 / 计算尺寸和实际帧数，不排队 |
-| `generation.submit` | `target`、`generation` | 校验、保存任务并进入队列 |
+| `generation.defaults / preview` | 可选模式、媒体类型 / 完整参数 | 恢复最近配置 / 计算尺寸和实际帧数，不排队 |
+| `generation.submit` | `generation`、可选 `name` | 校验、保存素材库任务并进入队列 |
+| `references.describe` | 有序 `files` | 返回原参考图名称、预览 URL、缺失状态 |
 | `queue.toggle` | 无 | 暂停或继续后续任务 |
 | `task.cancel / resume` | `id` | 取消指定任务 / 查询已知后端任务 |
 | `chat.send` | `text` | 真实 DeepSeek 请求 |
@@ -242,7 +263,7 @@ class Generation {
 
 v1.1.1 的新请求在 `StudioService.defaults()` 调用 `new_seed()`，相当于 Java 的 `new SecureRandom().nextLong() & Long.MAX_VALUE`，以字符串返回给 Vue；不会继续默认固定为 42。用户确认后保存该值，恢复任务、使用历史参数时不会重新随机。领域对象保留 `seed=42` 作为旧参数缺失时的兼容缺省值。`default_steps(mode)` 统一提供 Qwen 40、四视图 10、RFMSR 15、其他工作流 8；默认窗口显示具体数值，输入 0 在提交前解析为实际步数并写入记录。
 
-当前模式包含 Qwen 文生图/编辑、Krea2 文生图/四视图、H3 图生/参考/文生/首尾帧视频，以及 RFMSR 放大。后端再次检查视频只能属于分镜，角色和场景不能生成视频。
+当前模式包含 Qwen 文生图/编辑、Krea2 文生图/四视图、H3 图生/参考/文生/首尾帧视频，以及 RFMSR 放大。新图片和视频任务都独立生成到素材库，无需先有分镜。用户选用时，角色/场景只接收图片，分镜可接收图片和视频。
 
 `references` 是有序列表，提示词的 `<image1>` 等引用必须对应真实顺序。Qwen 编辑最多 16 张，H3 参考 1–9 张，首尾帧恰好 2 张，放大使用 1 张。不能把尚未生成的未来路径当参考。
 
@@ -274,7 +295,7 @@ int frames(double seconds) {
 
 ## 6. 队列、后台线程和数字进度
 
-提交任务时，服务深复制参数和关联素材快照，把任务保存为 `new`，保存该条目上次提示词，然后调用 `start_next()`。取消生成窗口不会覆盖上次提示词。
+提交任务时，服务复制完整生成参数，把素材库任务保存为 `new`，再调用 `start_next()`。原提示词、有序参考图和全部参数保存在任务中；`defaults()` 从最近同模式任务恢复，只有新请求种子换新。历史“再次生成”使用所选历史任务的完整原配置。取消生成窗口不会覆盖上次已提交配置。
 
 同一 Studio 实例只执行一个生成/恢复任务。`start_next()` 在没有 active 任务且队列未暂停时，取第一项 `new` 任务。不能把外部 ComfyUI 的整条队列当成自己的队列。
 
@@ -369,11 +390,11 @@ sequenceDiagram
     end
 ```
 
-### 7.1 为什么先创建素材时不能用旧 ID
+### 7.1 AI 生成不创建存放条目
 
-同轮先 `add_item` 再 `generate` 时，AI 用 `@新条目名称` 引用尚未创建的条目。`action_targets.py` 在创建实际成功后解析为新 ID，创建取消或失败则阻止后续依赖操作。它不是把第一个角色或当前选中对象当默认目标。
+新 `generate` 工具只接收模式、提示词和有序参考图，不要求 `target`。说“让这张图动起来”直接提出 `h3_i2v` 审阅，用本轮引用的真实原图，不创建分镜、不补生图。AI 当前没有像素输入，只依据用户说明、选中素材和本轮附件路径编写提示词。
 
-`review.respond` 必须携带当前 pending 的 ID。过期或重复确认报错，不能重复提交。版本归属还有上一节的 `job.target` 校验，二者解决的是不同阶段的问题。
+仅用户明确要求把已有图片添加为角色/场景时，`add_item` 才使用库中真实 `file`；不能先创建空资产。审阅仍须有效 pending ID，取消或过期确认不排队。旧导入建议中的 `target` 可读取，但不再决定新结果归属。旧同轮 `@名称` 依赖仍验证已创建成功，取消创建不会执行其依赖操作。
 
 ### 7.2 Skill 与补读指南
 
@@ -493,3 +514,51 @@ LibraryPage query(LibraryQuery q) {
 Qwen T2I 默认与新批准文件一致：BF16、40 步、16-bit PNG、6.6 MP 可调；已有图片默认进入编辑。编辑尺寸选择是 `Generation.edit_follow_source`，但保存时从 `job.generation` 中移出，另写到任务顶层，执行器再读取。这样冻结 v1.0.0 的 `Generation(**job['generation'])` 不会遇到未知参数。原 schema、项目 ID 和原图保持不变；新旧 DTO 的展示字段与持久化字段需要分别考虑。
 
 本版额外真实验证脚本为 `qwen-live.mjs` 与 `asset-query-live.mjs`，分别调用真实 ComfyUI 和 DeepSeek，不属于默认离线测试。素材库测试需要专用项目副本和真实旧结果；最新记录见 [v1.1.0 验收](VALIDATION-v1.1.0.json)。
+
+
+## 13. v1.2.0：素材库优先交互与拖拽的 Java 对照
+
+### 13.1 为什么保留 schema 1
+
+新任务沿用旧任务的 `id/generation/status/outputs` 字段，只把 `target` 设为保留值 `__library__`，新增可选 `name`。兼容入口提供原条目时，新记录的可选 `origin_target` 仅用于回填配置，不代表自动采用。恢复旧未完成任务的可选 `library_only` 控制新输出仅入库，原 `target` 不改写。导入显示名放在可选 `media_names` 字典；没有该字典的旧项目照常查询。旧角色描述只从 UI 移除，原数据保留。
+
+把图片分配为两个角色也只引用同一个原文件；库中 ID 是相对路径的摘要，选用、改资产名称、取消 AI 引用都不改变它。移除资产不删除原文件。库中名称与资产名称各自独立。
+
+```java
+record GenerationRequest(String mode, String prompt, List<String> references,
+                         long seed, int steps) {}
+record AdoptRequest(String itemId, String originalFile) {}
+
+// 两个请求必须独立；创建生成任务不能同时调用 adopt。
+String generate(GenerationRequest request) { return queue.submit(request); }
+String adopt(AdoptRequest request) { return project.useMedia(request); }
+```
+
+### 13.2 原输入与生成结果不能混用
+
+例如 `references=[A,B]` 编辑得到 C，再次生成恢复 A、B 和原提示词，不能自动改为 `[C]`。库详情的“基于此图继续编辑”明确开一个新编辑请求，参考图变成 C，提示词由用户重新填写。“用此图生成视频”同理。生成后只有用户确认选用才更改资产或分镜当前文件。
+
+审阅使用 `ReferenceImages.vue` 查询 `references.describe`，显示实际原图、编号、缺失状态，支持放大和移除。生成输入的顺序不能用查询排序替代。
+
+### 13.3 Windows 外部文件拖拽
+
+浏览器 File API 没有可靠的 Windows 绝对路径，视频转成 base64 也不适合原有桥接请求。因此在 `file_drop.py` 的 Qt 事件过滤器接收本机 `QMimeData.urls()`，仅处理本窗口里的本地文件 URL，按 WebEngine 缩放换算坐标，发送 `xy-files-dropped` 事件给 Vue。
+
+Java 近似职责：桌面 WebView 宿主的 DropTarget 取得本机 Path，再通过页面事件传文件列表和落点。下面是概念代码，具体 JavaFX/Swing 拖拽 API 与本项目 Qt 不同。
+
+```java
+void onNativeDrop(List<Path> paths, double viewX, double viewY, double zoom) {
+    var detail = Map.of("paths", paths.stream().map(Path::toString).toList(),
+                        "x", viewX / zoom, "y", viewY / zoom);
+    String json = jsonSerializer.write(detail); // 不能拼接未经转义的文件名
+    webView.dispatchEvent("xy-files-dropped", json);
+}
+```
+
+Vue 根据落点选择图片库、视频库、AI 附件或生成参考区；Python 先验证整批类型和可读取性，再导入原文件并保存。内部拖拽使用包含项目 ID 和原相对路径的专用 MIME，拒绝跨项目引用。拖入 AI 只准备下一条消息附件，不能自动发送或生成；附件可移除。
+
+### 13.4 空状态与实际测试
+
+空图片库/视频库提示先生成或导入，并提供入口；已有库搜索无结果提示清除筛选。顶部生成入口在 AI 收起后仍可见。资产添加必须先选图再确认；取消不产生资产、版本或任务。
+
+后端语义测试在 `test_library_flow.py`，桌面端交互在 `library-flow.spec.ts`。原 `desktop.spec.ts` 继续验证旧项目、视频播放、任务进度、恢复入口、历史、选中取消、2K/4K 和大量镜头。真实 DeepSeek 与 ComfyUI 验证独立于默认离线测试，见本版验收记录；不能把测试导入建议当作真实 API 验证。
