@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QFileDialog
 
 from . import __version__
 from .storage import Project, atomic_json, uid, now
-from .workflows import Generation, MODES, RATIOS, STYLES, resolution, frames
+from .workflows import Generation, MODES, RATIOS, STYLES, resolution, frames, new_seed, default_steps
 from .comfy import Comfy, execute
 from .deepseek import chat, list_models, DEFAULT_MODELS, validate_action
 from .action_targets import resolve_target
@@ -343,10 +343,13 @@ class StudioService(QObject):
         if mode is None:
             mode = 'qwen_edit' if item['image'] else 'qwen'
         refs = [item['image']] if item['image'] and mode in ('h3_i2v', 'upscale', 'quad', 'qwen_edit') else []
-        return self.wire_generation(asdict(Generation(mode=mode, prompt=self.project.last_prompt(target, mode) or item['description'], references=refs, megapixels=.2 if mode.startswith('h3') else 6.6 if mode=='qwen' else 1, seconds=2 if mode.startswith('h3') else 5, qwen_int8=mode=='qwen_edit')))
+        return self.wire_generation(asdict(Generation(mode=mode, prompt=self.project.last_prompt(target, mode) or item['description'], references=refs, seed=new_seed(), steps=default_steps(mode), megapixels=.2 if mode.startswith('h3') else 6.6 if mode=='qwen' else 1, seconds=2 if mode.startswith('h3') else 5, qwen_int8=mode=='qwen_edit')))
 
     def submit(self, target, generation):
         item, g = self._generation(target, generation)
+        # Resolve the legacy 0 sentinel before journaling. Do not re-randomize
+        # reviewed seeds here: retries and recovery must reproduce this request.
+        g.steps = g.steps or default_steps(g.mode)
         parameters = asdict(g)
         parameters.pop('edit_follow_source')
         j = {'id': uid(), 'target': target, 'generation': parameters, 'materials': copy.deepcopy([self.project.get(i) for i in item['materials']]), 'status': 'new', 'created': now()}
@@ -633,8 +636,12 @@ class StudioService(QObject):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(file))); return True
         if command == 'generation.defaults':
             return self.defaults(a['target'], a.get('mode'))
+        if command == 'generation.seed':
+            return str(new_seed())
         if command == 'generation.preview':
             g = self.parse_generation(a['generation'])
+            if type(g.steps) is not int or not 0 <= g.steps <= 100:
+                raise ValueError('采样步数必须为 0–100 的整数')
             w, h = resolution(g.ratio, g.megapixels, 32 if g.mode.startswith('h3') or g.mode=='qwen_edit' else 8)
             if g.mode=='qwen':
                 # The approved selector uses 8 px. Qwen's 16 px VAE then rounds
@@ -644,7 +651,7 @@ class StudioService(QObject):
                 with Image.open(p.file(g.references[0])) as im: w, h = int(im.width*g.scale), int(im.height*g.scale)
             if g.mode=='qwen_edit' and g.edit_follow_source and g.references:
                 with Image.open(p.file(g.references[0])) as im: w, h = max(32,round(im.width/32)*32), max(32,round(im.height/32)*32)
-            return {'width':w,'height':h,'frames':frames(g.seconds),'seconds':frames(g.seconds)/24}
+            return {'width':w,'height':h,'frames':frames(g.seconds),'seconds':frames(g.seconds)/24,'steps':g.steps or default_steps(g.mode)}
         if command == 'generation.submit':
             return self.submit(a['target'], a['generation'])
         if command == 'queue.toggle':

@@ -1,17 +1,19 @@
-# XY Studio — v1.1.0
+# XY Studio — v1.1.1
 
 面向个人短故事创作者的 Windows 桌面工作台。Vue 3 是唯一正式界面，以 QWebEngineView + QWebChannel 连接原有 Python 后端；调用本机 ComfyUI，DeepSeek 用于对话、故事组织和生成建议。
 
 ## 启动
 
 1. 启动已安装节点和模型的 ComfyUI，默认 `http://127.0.0.1:8188`。
-2. 双击 `releases/v1.1.0/XY-Studio/XY-Studio.exe`。发布包需保留整个 XY-Studio 文件夹，不能只复制 EXE。
+2. 双击 `releases/v1.1.1/XY-Studio/XY-Studio.exe`。发布包需保留整个 XY-Studio 文件夹，不能只复制 EXE。
 3. 新建空项目文件夹，或打开已有 `project.json`。项目可放在任意可写目录。
 4. 在设置中填 DeepSeek API Key（可以暂时不填，手工生成正常使用）。密钥存入 Windows 凭据管理器，不写入项目或 Git。
 
 源码运行：Python 3.12，安装 `requirements.txt`，执行 `npm --prefix frontend ci` 和 `npm --prefix frontend run build`，再运行 `python main.py`。本机已创建 `.venv`，可运行 `run.ps1`。构建 Windows 包：`scripts/build.ps1`；不覆盖已有版本目录。开发测试：`python -m pytest tests --basetemp local-data/pytest-local`（仅用此专用临时目录）。
 
 ## 使用
+
+v1.1.1：修复 Agent 与手动生成始终使用固定种子 42、反复产生同一异常图片的问题。每次新建生成请求使用新种子，审阅窗口支持“换一个随机种子”，仍可输入指定种子或按历史参数复现。默认显示具体采样步数；输入 0 时显示并保存实际采用的步数。已排队、恢复查询和历史重试保留确认的种子。详见 [问题定位与实测](docs/RELEASE-v1.1.1.md)。
 
 v1.1.0：新增当前项目图片库和视频库，汇总导入素材、全部生成文件、历史版本、未关联素材及删除条目后保留的结果。支持搜索、来源/归属筛选、分页、实际尺寸与时长、预览、定位来源及发送具体文件给 AI。生成参数窗口可从完整图片库选历史参考图。AI 增加两个只读资产查询工具；取消引用支持逐项移除和清空，即使当前没有选中卡片也能操作。取消作用于下一条消息，不撤回已发出的请求或旧聊天。详见 [本版交付说明](docs/RELEASE-v1.1.0.md)。
 

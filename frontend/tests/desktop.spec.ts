@@ -93,6 +93,11 @@ test('shot numbering, real associations, timeline, folding and media mode bounda
  const imageModes=await page.getByLabel('生成工作流').locator('option').evaluateAll(o=>o.map(v=>(v as HTMLOptionElement).value));
  expect(imageModes).toContain('upscale');expect(imageModes.every(v=>!v.startsWith('h3'))).toBeTruthy();
  await page.getByLabel('生成工作流').selectOption('upscale');await expect(page.getByLabel('放大倍数')).toBeVisible();await expect(page.getByLabel('H3 时长')).toHaveCount(0);
+ await expect(page.getByLabel('采样步数',{exact:true})).toHaveValue('15');
+ await page.getByLabel('生成工作流').selectOption('qwen');await expect(page.getByLabel('采样步数',{exact:true})).toHaveValue('40');
+ await page.getByLabel('采样步数',{exact:true}).fill('24');
+ await page.getByLabel('生成工作流').selectOption('krea');await expect(page.getByLabel('采样步数',{exact:true})).toHaveValue('8');
+ await page.getByLabel('生成工作流').selectOption('qwen');await expect(page.getByLabel('采样步数',{exact:true})).toHaveValue('24');
  await page.getByRole('button',{name:'取消生成',exact:true}).click();
  await page.getByTestId('shot-'+shot).getByRole('button',{name:'生成视频',exact:true}).click();
  const videoModes=await page.getByLabel('生成工作流').locator('option').evaluateAll(o=>o.map(v=>(v as HTMLOptionElement).value));
@@ -103,9 +108,16 @@ test('shot numbering, real associations, timeline, folding and media mode bounda
 test('queue parameters and cancellation persist, last prompt restored, no fake progress',async()=>{
  await rpc('queue.toggle');
  await page.getByTestId('shot-'+shot).getByRole('button',{name:'生成图片',exact:true}).click();
- await page.getByLabel('生成提示词').fill('界面测试提示词，实际加入暂停队列');await page.getByLabel('种子').fill('9223372036854775807');
+ await expect(page.getByLabel('采样步数',{exact:true})).toHaveValue('40');
+ const initialSeed=await page.getByLabel('种子',{exact:true}).inputValue();
+ await page.getByRole('button',{name:'换一个随机种子',exact:true}).click();
+ await expect(page.getByLabel('种子',{exact:true})).not.toHaveValue(initialSeed);
+ await page.getByLabel('采样步数',{exact:true}).fill('0');
+ await expect(page.locator('.form-note')).toContainText('40 步');
+ await page.getByLabel('生成提示词').fill('界面测试提示词，实际加入暂停队列');await page.getByLabel('种子',{exact:true}).fill('9223372036854775807');
  await page.getByRole('button',{name:'加入生成队列',exact:true}).click();
  let s=await state();expect(s.project.tasks[0].status).toBe('new');expect(s.project.tasks[0].progress).toBeNull();expect(s.project.tasks[0].generation.seed).toBe('9223372036854775807');
+ expect(s.project.tasks[0].generation.steps).toBe(40);
  await expect(page.getByTestId('shot-'+shot).getByRole('progressbar')).toBeVisible();
  await expect(page.getByTestId('shot-'+shot).getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
  await expect(page.getByTestId('shot-'+shot)).toContainText('等待执行 · 队列已暂停');

@@ -2,7 +2,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 import pytest
-from studio.workflows import Generation,build,frames,resolution,preflight,MODES,STYLES
+from studio.workflows import Generation,build,frames,resolution,preflight,MODES,STYLES,default_steps
 from studio.storage import Project,uid
 from studio.comfy import execute,Comfy
 from studio.deepseek import validate_action,chat
@@ -34,6 +34,21 @@ def test_qwen_t2i_matches_approved_precision_sampling_and_export():
     assert graph['encode']['inputs']['resolution']==1024
     assert (graph['latent']['inputs']['width'],graph['latent']['inputs']['height'])==resolution('16:9',6.6,8)
     assert graph['output']['inputs']['format.bit_depth']=='16-bit'
+
+
+@pytest.mark.parametrize('mode',list(MODES))
+def test_zero_steps_still_uses_workflow_default_in_legacy_jobs(mode):
+    refs=['a']*({'qwen_edit':1,'quad':1,'h3_i2v':1,'h3_ref':1,'h3_fl2v':2,'upscale':1}.get(mode,0))
+    g=Generation(mode=mode,prompt='test',references=refs,seed=100,steps=0)
+    graph=build(g,refs)
+    sampler=graph['sigmas' if mode.startswith('h3') else 'up' if mode=='upscale' else 'sample']['inputs']
+    assert sampler['steps']==default_steps(mode)
+
+
+@pytest.mark.parametrize('steps',[True,1.5,'40',-1,101])
+def test_invalid_sampling_steps_rejected_before_comfy_submission(steps):
+    with pytest.raises(ValueError,match='整数'):
+        Generation(prompt='test',steps=steps).validate()
 
 def test_lora_disable_rewires_both_h3_consumers():
     g=Generation(mode='h3_i2v',prompt='test',references=['x'],cinema=True)

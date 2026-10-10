@@ -3,6 +3,7 @@
 No editor-mode bypass ambiguity: disabled LoRAs are absent from API graphs.
 """
 import math
+import secrets
 from dataclasses import dataclass, field, asdict
 
 STYLES = {
@@ -21,6 +22,15 @@ MODES = {'qwen': 'Qwen 图片生成', 'qwen_edit': 'Qwen 图片编辑',
          'h3_i2v': 'H3 图生视频', 'h3_ref': 'H3 参考生视频',
          'h3_t2v': 'H3 文生视频', 'h3_fl2v': 'H3 首尾帧视频', 'upscale': 'RFMSR 高清放大'}
 RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9']
+
+def new_seed():
+    """Choose once for a new request; queued/recovered jobs retain that value."""
+    return secrets.randbelow(2**63)
+
+def default_steps(mode):
+    if mode not in MODES:
+        raise ValueError('未知工作流')
+    return 40 if mode.startswith('qwen') else 10 if mode=='quad' else 15 if mode=='upscale' else 8
 
 def resolution(ratio, mp, multiple=32):
     if ratio not in RATIOS or not .1 <= mp <= 16:
@@ -60,7 +70,7 @@ class Generation:
         resolution(self.ratio, self.megapixels)
         frames(self.seconds)
         if not 0 <= self.seed < 2**63: raise ValueError('种子必须为 0 至 2^63-1')
-        if not 0 <= self.steps <= 100: raise ValueError('采样步数范围 0–100')
+        if type(self.steps) is not int or not 0 <= self.steps <= 100: raise ValueError('采样步数必须为 0–100 的整数')
         if not 1 <= self.scale <= 8: raise ValueError('放大倍数范围 1–8')
         if not 0 <= self.cinema_strength <= 2: raise ValueError('LoRA 强度范围 0–2')
         if any(s not in STYLES for s in self.styles): raise ValueError('未知 Krea 风格')
@@ -82,7 +92,7 @@ def build(g: Generation, uploaded: list[str], prefix='AIStoryStudio'):
     refs=[node(f'ref{i}','LoadImage',image=p) for i,p in enumerate(uploaded)]
     if g.mode=='upscale':
         model=node('rf','RH_RFMSR_ModelLoader',checkpoint='rfmsr.safetensors',precision='bfloat16',memory_mode='unload_after_run')
-        out=node('up','RH_RFMSR_Upscale',rfmsr_model=model,image=refs[0],scale=g.scale,steps=g.steps or 15,flow_sigma=1.0,seed=g.seed,color_correction='wavelet',tile_mode='auto',tile_size=512,tile_stride=256)
+        out=node('up','RH_RFMSR_Upscale',rfmsr_model=model,image=refs[0],scale=g.scale,steps=g.steps or default_steps(g.mode),flow_sigma=1.0,seed=g.seed,color_correction='wavelet',tile_mode='auto',tile_size=512,tile_stride=256)
     elif g.mode.startswith('h3'):
         model=node('model','UNETLoader',unet_name='10Eros_Max_h3_TURBO-hybrid_beta4_int8_convrot.safetensors',weight_dtype='default')
         if g.cinema:
@@ -102,7 +112,7 @@ def build(g: Generation, uploaded: list[str], prefix='AIStoryStudio'):
         guide=node('guide','BasicGuider',model=model,conditioning=cond)
         noise=node('noise','RandomNoise',noise_seed=g.seed)
         sampler=node('sampler','KSamplerSelect',sampler_name='res_multistep')
-        sigmas=node('sigmas','BasicScheduler',model=model,scheduler='simple',steps=g.steps or 8,denoise=1.0)
+        sigmas=node('sigmas','BasicScheduler',model=model,scheduler='simple',steps=g.steps or default_steps(g.mode),denoise=1.0)
         samples=node('sample','SamplerCustomAdvanced',noise=noise,guider=guide,sampler=sampler,sigmas=sigmas,latent_image=['cond',1])
         out=node('decode','VAEDecode',samples=samples,vae=vae)
         sound=node('sound','VAEDecodeAudio',samples=samples,vae=audio)
@@ -140,7 +150,7 @@ def build(g: Generation, uploaded: list[str], prefix='AIStoryStudio'):
             prompt=g.prompt + ''.join(', '+STYLES[s] for s in g.styles)
             positive=node('encode','CLIPTextEncode',clip=clip,text=prompt)
             negative=node('negative','ConditioningZeroOut',conditioning=positive)
-        samples=node('sample','KSampler',model=model,positive=positive,negative=negative,latent_image=latent,seed=g.seed,steps=g.steps or (40 if qwen else 10 if g.mode=='quad' else 8),cfg=1.0,sampler_name='euler',scheduler='simple',denoise=1.0)
+        samples=node('sample','KSampler',model=model,positive=positive,negative=negative,latent_image=latent,seed=g.seed,steps=g.steps or default_steps(g.mode),cfg=1.0,sampler_name='euler',scheduler='simple',denoise=1.0)
         out=node('decode','VAEDecode',samples=samples,vae=vae)
     if g.mode.startswith('qwen'):
         node('output','SaveImageAdvanced',images=out,filename_prefix=prefix,format='png',**{'format.bit_depth':'16-bit' if g.mode=='qwen' else '8-bit','format.input_color_space':'sRGB'})

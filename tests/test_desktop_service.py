@@ -148,6 +148,32 @@ def test_default_new_image_uses_approved_qwen_t2i_and_existing_image_uses_edit(s
     assert call(s,'generation.defaults',target=target)['mode']=='qwen_edit'
 
 
+def test_manual_and_agent_defaults_choose_once_and_confirmed_seed_survives_reopen(service,monkeypatch):
+    s=service;target=call(s,'asset.add',kind='scenes',name='舞台')
+    values=iter([2**63-2,100,456])
+    monkeypatch.setattr(module,'new_seed',lambda:next(values))
+    first=call(s,'generation.defaults',target=target)
+    second=call(s,'generation.defaults',target=target)
+    assert first['seed']=='9223372036854775806' and second['seed']=='100'
+    assert first['steps']==second['steps']==40
+    assert call(s,'generation.preview',generation={**first,'steps':0})['steps']==40
+    s.project.data['queue_paused']=True
+    s._accept_message({'role':'assistant','content':'请审阅生成。','tool_calls':[{'id':'generate-scene','type':'function','function':{'name':'generate','arguments':json.dumps({'target':target,'mode':'qwen','prompt':'舞台','references':[]})}}]})
+    assert s.pending['generation']['seed']=='456' and s.pending['generation']['steps']==40
+    # User edits the reviewed seed; approval must not pick yet another seed.
+    call(s,'review.respond',id=s.pending['id'],accepted=True,generation={**s.pending['generation'],'seed':'100','steps':0})
+    job=s.project.data['jobs'][-1]
+    assert job['generation']['seed']==100 and job['generation']['steps']==40
+    assert Project(s.project.root).data['jobs'][-1]['generation']==job['generation']
+
+
+def test_new_seed_button_returns_exact_long_string_without_mutating_project(service,monkeypatch):
+    monkeypatch.setattr(module,'new_seed',lambda:2**63-1)
+    before=json.dumps(service.project.data,sort_keys=True)
+    assert call(service,'generation.seed')=='9223372036854775807'
+    assert json.dumps(service.project.data,sort_keys=True)==before
+
+
 def test_library_import_validates_batch_and_video_cannot_be_an_image_reference(service,tmp_path):
     import av
     s=service; target=call(s,'asset.add',kind='shots')
