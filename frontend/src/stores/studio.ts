@@ -1,7 +1,7 @@
 import { computed, ref } from 'vue';
 import { defineStore } from 'pinia';
 import { connect,command } from '../gateway';
-import type {Asset,Generation,Page,ProjectState,State,Suggestion} from '../types';
+import type {Asset,Generation,Page,ProjectState,State,Suggestion,Version,LibraryResult} from '../types';
 const empty:ProjectState={id:'',name:'打开一个故事',root:'',story:'',updated:'',assets:[],shots:[],tasks:[],chat:[],paused:false};
 export const useStudio=defineStore('studio',()=>{
   const state=ref<State|null>(null),connectionError=ref(''),ready=ref(false),page=ref<Page>('projects');
@@ -25,7 +25,12 @@ export const useStudio=defineStore('studio',()=>{
   function fold(id:string,value:boolean){collapsed.set(id,value);const s=project.value.shots.find(s=>s.id===id);if(s)s.collapsed=value;}
   function select(id:string|null){void api('selection',{id}).catch(()=>{});}
   function toggleSelection(id:string){void api('selection',{id,toggle:true}).catch(()=>{});}
-  function clearContext(){void api('selection',{id:null,clear:true}).catch(()=>{});}
+  function clearContext(){return api('context.clear');}
+  function removeContext(id:string){return api('context.remove',{id});}
+  function removeMediaContext(file:string){return api('context.remove',{file});}
+  async function pinMedia(file:string){await api('context.add_media',{file});assistantOpen.value=true;notify('已添加到下一条消息的素材引用');}
+  function queryLibrary(kind:'image'|'video',query:Record<string,unknown>={}){return api<LibraryResult>('library.query',{kind,...query});}
+  function previewMedia(file:string){return api<Version>('library.preview',{file});}
   function pin(id:string){assistantOpen.value=true;void api('selection',{id,pin:true}).catch(()=>{});}
   async function openProject(path?:string){const result=await api('project.open',path?{path}:{});if(result)page.value='shots';}
   async function createProject(name:string){const result=await api('project.new',{title:name});if(result)page.value='shots';}
@@ -53,5 +58,5 @@ export const useStudio=defineStore('studio',()=>{
   function importAgent(){return api('agent.import')}
   function openFile(file:string){return api('media.open',{file})}
   function reviewed(id:string){return api('asset.reviewed',{id})}
-  return {state,connectionError,ready,page,project,hasProject,projects,assistantOpen,selectedId,selection,model,online,paused,busy,totalDuration,pendingTasks,toast,persistenceError,notify,api,initialize,fold,select,toggleSelection,clearContext,pin,openProject,createProject,newShot,addAsset,editAsset,link,remove,importImage,useVersion,taskStatus,defaults,queueGeneration,toggleQueue,cancelTask,resumeTask,sendChat,reviewSuggestion,save,saveStory,refreshModels,saveSettings,openLink,folder,importAgent,openFile,reviewed};
+  return {state,connectionError,ready,page,project,hasProject,projects,assistantOpen,selectedId,selection,model,online,paused,busy,totalDuration,pendingTasks,toast,persistenceError,notify,api,initialize,fold,select,toggleSelection,clearContext,removeContext,removeMediaContext,pinMedia,queryLibrary,previewMedia,pin,openProject,createProject,newShot,addAsset,editAsset,link,remove,importImage,useVersion,taskStatus,defaults,queueGeneration,toggleQueue,cancelTask,resumeTask,sendChat,reviewSuggestion,save,saveStory,refreshModels,saveSettings,openLink,folder,importAgent,openFile,reviewed};
 });

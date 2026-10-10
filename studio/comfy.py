@@ -114,7 +114,9 @@ def execute(client, project, job, notify=lambda s:None, stopping=lambda:False):
             client.open_progress(job.get('client_id'));job['client_id']=client.client_id
         job.pop('progress',None)
         if not job.get('prompt_id'):
-            g=Generation(**job['generation']); g.validate()
+            g=Generation(**job['generation'])
+            if 'edit_follow_source' in job: g.edit_follow_source=job['edit_follow_source']
+            g.validate()
             uploaded=[client.upload(project.file(p)) for p in g.references]
             graph=build(g,uploaded,'AIStoryStudio/'+job['id'])
             preflight(graph,client.info())

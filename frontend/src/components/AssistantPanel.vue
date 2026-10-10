@@ -25,6 +25,8 @@ const userMessages = computed(() =>
   store.project.chat.filter((m) => m.role === "user"),
 );
 const jump = ref("");
+const pins = computed(() => (store.state?.contextIds || []).map(id=>({id,name:store.project.assets.find(a=>a.id===id)?.name || store.project.shots.find(s=>s.id===id)?.name || '素材'})));
+const hasContext = computed(() => !!store.selection || !!pins.value.length || !!store.state?.mediaContext.length);
 async function bottom() {
   await nextTick();
   if (messages.value) messages.value.scrollTop = messages.value.scrollHeight;
@@ -82,13 +84,17 @@ function jumpTo() {
         >正在讨论 <strong>{{ store.selection.name }}</strong></span
       ><button
         class="icon-btn"
-        aria-label="清除 AI 上下文"
-        @click="store.clearContext()"
+        :aria-label="`取消讨论${store.selection.name}`"
+        @click="store.removeContext(store.selection.id)"
       >
         <X :size="13" />
       </button>
     </div>
-    <div v-if="store.state?.contextIds.length" class="context-pins"><span v-for="id in store.state.contextIds" :key="id">{{store.project.assets.find(a=>a.id===id)?.name || store.project.shots.find(s=>s.id===id)?.name}}</span></div><div ref="messages" class="chat-scroll" aria-live="polite">
+    <div v-if="hasContext" class="context-summary"><span>用于下一条消息的引用</span><button class="text-action" aria-label="清除 AI 上下文" @click="store.clearContext">清空</button></div>
+    <div v-if="pins.length || store.state?.mediaContext.length" class="context-pins">
+      <span v-for="pin in pins" :key="pin.id">{{pin.name}}<button class="icon-btn" :aria-label="`移除AI引用${pin.name}`" @click="store.removeContext(pin.id)"><X :size="12"/></button></span>
+      <span v-for="media in store.state?.mediaContext" :key="media.file">{{media.kind==='video'?'视频':'图片'}} · {{media.name}}<button class="icon-btn" :aria-label="`移除AI素材引用${media.name}`" @click="store.removeMediaContext(media.file)"><X :size="12"/></button></span>
+    </div><div ref="messages" class="chat-scroll" aria-live="polite">
       <div class="chat-day">今天 · 继续你的创作</div>
       <article
         v-for="message in store.project.chat"

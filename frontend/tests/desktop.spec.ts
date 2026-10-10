@@ -14,6 +14,7 @@ async function state(){return rpc('bootstrap') as Promise<any>}
 test.beforeAll(async()=>{
  browser=await chromium.connectOverCDP(process.env.XY_CDP || 'http://127.0.0.1:9225',{noDefaults:true});
  page=browser.contexts()[0]!.pages()[0]!;
+ await page.reload();
  await expect(page.getByRole('button',{name:/保存项目/})).toBeVisible();
  original=(await state()).project.root;
  root=path.resolve('../local-data','v030-ui-'+Date.now());
@@ -174,7 +175,7 @@ test('1920/2K/4K and browser zoom keep media, chat and navigation usable',async(
  await page.evaluate(()=>document.documentElement.style.zoom='1.25');
  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBeTruthy();
  await page.evaluate(()=>document.documentElement.style.zoom='1');
- await page.screenshot({path:process.env.XY_SCREENSHOT || '../docs/screenshots/v030-storyboard.png'});
+ await page.screenshot({path:process.env.XY_SCREENSHOT || `../docs/screenshots/${validationVersion}-storyboard.png`});
 });
 test('many real shot cards and empty search do not break the workbench',async()=>{
  await rpc('project.open',{path:root});
@@ -228,4 +229,100 @@ test('real generated task history shows its own images and video poster',async()
  await expect(row.locator('.task-details')).not.toContainText('prompt_id');
  await page.locator('.workspace-scroll').evaluate(e=>e.scrollTop=0);
  await page.screenshot({path:`../docs/screenshots/${validationVersion}-history.png`});
+});
+
+test('AI object and file references can be individually removed without a selected card',async()=>{
+ await rpc('project.open',{path:root});await rpc('context.clear');
+ await rpc('selection',{id:actor,pin:true});await rpc('selection',{id:scene,pin:true});
+ await rpc('selection',{id:null});
+ await page.getByRole('button',{name:'移除AI引用Vue 角色改名',exact:true}).click();
+ let s=await state();expect(s.selectedId).toBeNull();expect(s.contextIds).toEqual([scene]);
+ const file=s.project.assets.find((a:any)=>a.id===actor).imageFile;
+ await rpc('context.add_media',{file});
+ await expect(page.locator('.context-pins')).toContainText('图片');
+ await page.getByRole('button',{name:/移除AI素材引用/}).click();
+ expect((await state()).mediaContext).toEqual([]);expect((await state()).contextIds).toEqual([scene]);
+ await rpc('selection',{id:scene});
+ await page.getByRole('button',{name:'取消讨论Vue 测试场景',exact:true}).click();
+ s=await state();expect(s.selectedId).toBeNull();expect(s.contextIds).toEqual([]);
+ await rpc('selection',{id:actor,pin:true});await rpc('context.add_media',{file});
+ await page.getByRole('button',{name:'清除 AI 上下文',exact:true}).click();
+ s=await state();expect(s.selectedId).toBeNull();expect(s.contextIds).toEqual([]);expect(s.mediaContext).toEqual([]);
+ expect(s.project.assets).toHaveLength(3); // Two original assets plus the review-created scene.
+});
+
+test('complete image library paginates all originals and restores generated historical references',async()=>{
+ await rpc('project.open',{path:path.resolve('../local-data/v110-library-fixture')});
+ await page.getByRole('button',{name:'图片库',exact:true}).click();
+ const all=await rpc('library.query',{kind:'image',limit:100}) as any;
+ expect(all.total).toBeGreaterThan(24);
+ await expect(page.locator('.library-card')).toHaveCount(24);
+ const first=await page.locator('.library-card').evaluateAll(cards=>cards.map(c=>c.getAttribute('data-testid')));
+ await page.getByRole('button',{name:'图片下一页',exact:true}).click();
+ await expect(page.locator('.library-card')).toHaveCount(all.total-24);
+ const second=await page.locator('.library-card').evaluateAll(cards=>cards.map(c=>c.getAttribute('data-testid')));
+ expect(first.filter(id=>second.includes(id))).toEqual([]);
+ await page.getByLabel('图片来源筛选').selectOption('generated');
+ await expect(page.locator('.library-card')).toHaveCount(all.stats.generated);
+ const history=all.items.find((r:any)=>r.source==='generated' && r.owners.some((o:any)=>o.kind==='scenes') && !r.current);
+ expect(history).toBeTruthy();
+ const card=page.getByTestId('library-'+history.id);
+ await expect.poll(()=>card.locator('img').evaluate((image:HTMLImageElement)=>image.naturalWidth)).toBeGreaterThan(0);
+ await card.getByRole('button',{name:'查看详情',exact:true}).click();
+ await expect(page.getByRole('dialog')).toContainText(history.prompt);
+ await page.getByRole('button',{name:'放大预览',exact:true}).click();await expect(page.locator('.preview-toolbar')).toBeVisible();await page.keyboard.press('Escape');
+ await card.getByRole('button',{name:'发送给 AI',exact:true}).click();
+ expect((await state()).mediaContext[0].file).toBe(history.file);
+ await page.getByRole('button',{name:/移除AI素材引用/}).click();expect((await state()).mediaContext).toEqual([]);
+ await card.getByRole('button',{name:'查看详情',exact:true}).click();
+ await page.getByRole('button',{name:history.owners[0].name,exact:true}).click();
+ const origin=page.getByTestId('asset-'+history.owners[0].id);await expect(origin).toHaveClass(/selected/);
+ await origin.getByRole('button',{name:'生成新版本',exact:true}).click();
+ await page.getByLabel('生成工作流').selectOption('qwen_edit');
+ await expect(page.getByLabel('使用本机 INT8 模型')).toBeChecked();
+ await expect(page.getByLabel('编辑输出尺寸')).toHaveValue('source');
+ await page.getByRole('button',{name:'从图片库选择',exact:true}).click();
+ await page.getByLabel('图片来源筛选').selectOption('generated');
+ await page.getByTestId('library-'+history.id).getByRole('button',{name:'选用这张图片',exact:true}).click();
+ await expect(page.locator('.choose-library')).toHaveCount(0);
+ // The appended row is an exact historical reference; backend validation returns the same real dimensions.
+ await expect(page.locator('.reference-row')).toHaveCount(2);
+ await page.getByLabel('编辑输出尺寸').selectOption('custom');await expect(page.getByLabel('分辨率 MP')).toBeVisible();
+ await page.getByRole('button',{name:'取消生成',exact:true}).click();
+ await page.getByRole('button',{name:'图片库',exact:true}).click();
+ await page.getByLabel('图片归属筛选').selectOption('deleted');await expect(page.locator('.library-card')).toHaveCount(1);
+ await expect(page.locator('.library-card')).toContainText('条目已删除');
+ await page.getByLabel('图片归属筛选').selectOption('all');
+ await page.getByLabel('搜索图片资产').fill('绝对不存在的素材');await expect(page.getByText('没有找到图片素材',{exact:true})).toBeVisible();
+ await page.getByRole('button',{name:'清除筛选',exact:true}).click();
+ await expect(page.locator('.library-card')).toHaveCount(24);
+ for(const [width,height] of [[1920,1080],[2560,1440],[3840,2160],[1024,768]]){
+  await page.setViewportSize({width:width!,height:height!});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBeTruthy();
+  await expect(page.getByRole('button',{name:'图片库',exact:true})).toBeVisible();
+ }
+ await page.setViewportSize({width:1600,height:950});
+ await page.screenshot({path:`../docs/screenshots/${validationVersion}-image-library.png`});
+});
+
+test('video library includes generated and imported originals, previews and cancels exact AI attachments',async()=>{
+ await page.getByRole('button',{name:'视频库',exact:true}).click();
+ const all=await rpc('library.query',{kind:'video',limit:100}) as any;
+ expect(all.total).toBe(2);expect(all.stats.generated).toBe(1);expect(all.stats.imported).toBe(1);
+ await expect(page.locator('.library-card')).toHaveCount(2);
+ const generated=all.items.find((r:any)=>r.source==='generated');
+ const card=page.getByTestId('library-'+generated.id);
+ await expect.poll(()=>card.locator('img').evaluate((image:HTMLImageElement)=>image.naturalWidth)).toBeGreaterThan(0);
+ await card.locator('.library-image').click();await expect(page.getByRole('dialog')).toBeVisible();
+ await page.waitForFunction(()=>document.querySelector('video')!.readyState>=2);
+ await page.getByRole('dialog').locator('video').evaluate(v=>v.play());
+ await page.waitForFunction(()=>document.querySelector('video')!.currentTime>.2);
+ expect(await page.getByRole('dialog').locator('video').evaluate(v=>v.error)).toBeNull();
+ await page.keyboard.press('Escape');
+ await card.getByRole('button',{name:'发送给 AI',exact:true}).click();
+ expect((await state()).mediaContext[0].kind).toBe('video');
+ await page.getByRole('button',{name:/移除AI素材引用/}).click();expect((await state()).mediaContext).toEqual([]);
+ await page.getByLabel('视频来源筛选').selectOption('imported');await expect(page.locator('.library-card')).toHaveCount(1);
+ await page.getByLabel('视频来源筛选').selectOption('all');await expect(page.locator('.library-card')).toHaveCount(2);
+ await page.screenshot({path:`../docs/screenshots/${validationVersion}-video-library.png`});
 });

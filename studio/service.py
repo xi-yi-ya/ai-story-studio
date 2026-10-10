@@ -27,6 +27,7 @@ from .media import video_poster, video_duration
 from .skill_library import CATALOG
 from .video_preview import PreviewCache
 from .presentation import display_chat_text, public_status
+from .asset_library import AssetLibrary, IMAGE_SUFFIXES, VIDEO_SUFFIXES, _metadata
 
 
 class Events(QObject):
@@ -46,6 +47,7 @@ class StudioService(QObject):
         self.project_lock = None
         self.selected = None
         self.context_ids = []
+        self.media_context = []
         self.active = None
         self.workers = {}
         self.events = Events(self)
@@ -208,6 +210,7 @@ class StudioService(QObject):
         self.media_token = uid()
         self.selected = None
         self.context_ids = []
+        self.media_context = []
         self.last_error = ''
         self.recent = [{'path': str(root), 'title': p.data['title']}] + [r for r in self.recent if r['path'] != str(root)]
         self.recent = self.recent[:12]
@@ -249,7 +252,7 @@ class StudioService(QObject):
                 poster = ''; error = str(e)
                 viewing = ''
         job = next((j for j in self.project.data['jobs'] if j['id'] == v.get('job')), None)
-        return {'id': v['id'], 'media': self.media_url(poster), 'url': self.media_url(viewing), 'file': v['file'], 'kind': v['kind'], 'prompt': v.get('intent', ''), 'time': v['time'], 'label': '生成版本' if job else '导入版本', 'generation': self.wire_generation(job['generation']) if job else None, 'materials': v.get('materials', []), 'error': error}
+        return {'id': v['id'], 'media': self.media_url(poster), 'url': self.media_url(viewing), 'file': v['file'], 'kind': v['kind'], 'prompt': v.get('intent', ''), 'time': v['time'], 'label': '生成版本' if job else '导入版本', 'generation': self.wire_generation(dict(job['generation'],edit_follow_source=job.get('edit_follow_source',False))) if job else None, 'materials': v.get('materials', []), 'error': error}
 
     def snapshot(self):
         models = self.settings.value('model_list', DEFAULT_MODELS, type=list)
@@ -257,7 +260,7 @@ class StudioService(QObject):
         if model not in models:
             models.append(model)
         config = {'comfy': self.settings.value('comfy', 'http://127.0.0.1:8188'), 'model': model, 'models': models, 'online': self.settings.value('online_search', True, type=bool), 'keySet': bool(keyring.get_password('AIStoryStudio', 'deepseek'))}
-        state = {'version': __version__, 'config': config, 'catalog': {'modes': MODES, 'ratios': RATIOS, 'styles': STYLES, 'skills': CATALOG}, 'recent': self.recent, 'selectedId': self.selected, 'contextIds': self.context_ids, 'activeJob': self.active['id'] if self.active else None, 'busy': bool('chat' in self.workers or self.batch or self.pending), 'modelsBusy': 'models' in self.workers, 'status': public_status(self.status), 'error': self.last_error, 'review': self.pending, 'project': None}
+        state = {'version': __version__, 'config': config, 'catalog': {'modes': MODES, 'ratios': RATIOS, 'styles': STYLES, 'skills': CATALOG}, 'recent': self.recent, 'selectedId': self.selected, 'contextIds': list(self.context_ids), 'mediaContext': copy.deepcopy(self.media_context), 'activeJob': self.active['id'] if self.active else None, 'busy': bool('chat' in self.workers or self.batch or self.pending), 'modelsBusy': 'models' in self.workers, 'status': public_status(self.status), 'error': self.last_error, 'review': self.pending, 'project': None}
         if not self.project:
             return state
         p = self.project
@@ -316,7 +319,7 @@ class StudioService(QObject):
                     kind = 'video' if Path(relative).suffix.lower() in ('.mp4', '.webm', '.mkv') else 'image'
                     version = self._version({'id':f"result-{j['id']}-{index}", 'job':j['id'], 'file':relative, 'kind':kind, 'time':j.get('created',''), 'intent':j['generation']['prompt']})
                 results.append(version)
-            tasks.append({'id': j['id'], 'targetId': j['target'], 'targetName': target_name, 'kind': 'video' if j['generation']['mode'].startswith('h3') else 'image', 'status': j['status'], 'progress': progress['value']/progress['max']*100 if progress and progress.get('max') else None, 'node': j.get('node'), 'steps': progress, 'prompt': j['generation']['prompt'], 'time': j.get('created', ''), 'error': j.get('error'), 'generation': self.wire_generation(j['generation']), 'outputs': [self.media_url(r) for r in j.get('outputs', [])], 'results':results, 'raw': j})
+            tasks.append({'id': j['id'], 'targetId': j['target'], 'targetName': target_name, 'kind': 'video' if j['generation']['mode'].startswith('h3') else 'image', 'status': j['status'], 'progress': progress['value']/progress['max']*100 if progress and progress.get('max') else None, 'node': j.get('node'), 'steps': progress, 'prompt': j['generation']['prompt'], 'time': j.get('created', ''), 'error': j.get('error'), 'generation': self.wire_generation(dict(j['generation'],edit_follow_source=j.get('edit_follow_source',False))), 'outputs': [self.media_url(r) for r in j.get('outputs', [])], 'results':results, 'raw': j})
         state['project'] = {'id': p.data['id'], 'name': p.data['title'], 'root': str(p.root), 'story': p.data['story'], 'updated': p.data.get('updated', ''), 'assets': assets, 'shots': shots, 'tasks': tasks, 'chat': messages, 'paused': p.data.get('queue_paused', False)}
         return state
 
@@ -331,19 +334,23 @@ class StudioService(QObject):
         for r in g.references:
             if not self.project.file(r).is_file():
                 raise ValueError('参考图不存在：'+r)
+            if Path(r).suffix.lower() not in IMAGE_SUFFIXES:
+                raise ValueError('此工作流只支持图片参考，视频不能作为参考图')
         return item, g
 
     def defaults(self, target, mode=None):
         item = self.require_project().get(target)
         if mode is None:
-            old = [j for j in self.project.data['jobs'] if j['target'] == target and j['generation']['mode'] in ('qwen', 'qwen_edit', 'krea', 'quad')]
-            mode = old[-1]['generation']['mode'] if old else 'qwen_edit' if item['image'] else 'qwen'
+            mode = 'qwen_edit' if item['image'] else 'qwen'
         refs = [item['image']] if item['image'] and mode in ('h3_i2v', 'upscale', 'quad', 'qwen_edit') else []
-        return self.wire_generation(asdict(Generation(mode=mode, prompt=self.project.last_prompt(target, mode) or item['description'], references=refs, megapixels=.2 if mode.startswith('h3') else 1, seconds=2 if mode.startswith('h3') else 5)))
+        return self.wire_generation(asdict(Generation(mode=mode, prompt=self.project.last_prompt(target, mode) or item['description'], references=refs, megapixels=.2 if mode.startswith('h3') else 6.6 if mode=='qwen' else 1, seconds=2 if mode.startswith('h3') else 5, qwen_int8=mode=='qwen_edit')))
 
     def submit(self, target, generation):
         item, g = self._generation(target, generation)
-        j = {'id': uid(), 'target': target, 'generation': asdict(g), 'materials': copy.deepcopy([self.project.get(i) for i in item['materials']]), 'status': 'new', 'created': now()}
+        parameters = asdict(g)
+        parameters.pop('edit_follow_source')
+        j = {'id': uid(), 'target': target, 'generation': parameters, 'materials': copy.deepcopy([self.project.get(i) for i in item['materials']]), 'status': 'new', 'created': now()}
+        if g.mode=='qwen_edit': j['edit_follow_source'] = g.edit_follow_source
         item.setdefault('last_prompts', {})[g.mode] = g.prompt
         self.project.data['jobs'].append(j)
         self.save()
@@ -379,11 +386,17 @@ class StudioService(QObject):
         self.rounds += 1
         context = copy.deepcopy({k:p.data[k] for k in ('id', 'title', 'story', 'characters', 'scenes', 'shots')})
         context['selected_ids'] = list(dict.fromkeys(([self.selected] if self.selected else [])+self.context_ids))
+        context['media_attachments'] = copy.deepcopy(self.media_context)
+        # Queries use this round's detached project snapshot, never a mutable
+        # UI-owned Project from a network worker. Files are read-only inputs.
+        query_project = object.__new__(Project)
+        query_project.root, query_project.data = p.root, copy.deepcopy(p.data)
+        library = AssetLibrary(query_project)
         history = copy.deepcopy(p.data['chat'])
         model = self.settings.value('model', DEFAULT_MODELS[0])
         online = self.settings.value('online_search', True, type=bool)
         self.status = 'AI 正在处理请求'
-        self._spawn('chat', lambda: chat(key, model, history, context, online=online, notify=lambda value:self.events.progress.emit('chat', value) if not self.closing else None))
+        self._spawn('chat', lambda: chat(key, model, history, context, online=online, notify=lambda value:self.events.progress.emit('chat', value) if not self.closing else None, asset_query=library.query))
         self.publish()
 
     def _accept_message(self, msg, continuation=False):
@@ -405,7 +418,8 @@ class StudioService(QObject):
                 pending = {'id': uid(), 'name': name, 'args': args, 'title': {'add_item':'创建条目', 'update_item':'修改条目', 'set_story':'保存故事', 'generate':'生成图片 / 视频'}[name]}
                 if name == 'generate':
                     target = self.project.get(args['target'])
-                    g = Generation(mode=args['mode'], prompt=args['prompt'], references=args['references'], megapixels=.2 if args['mode'].startswith('h3') else 1, seconds=2)
+                    g = self.parse_generation(self.defaults(target['id'],args['mode']))
+                    g.prompt, g.references = args['prompt'], args['references']
                     self._generation(target['id'], asdict(g))
                     pending.update(targetId=target['id'], targetName=target['name'], generation=self.wire_generation(asdict(g)))
                 self.pending = pending
@@ -520,6 +534,49 @@ class StudioService(QObject):
             p.data['story'] = a['text']; self.save(); return True
         if command == 'project.folder':
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(p.root))); return True
+        if command == 'library.query':
+            allowed = {'kind', 'query', 'source', 'owner', 'offset', 'limit', 'sort'}
+            if set(a)-allowed: raise ValueError('未知素材查询条件')
+            result = AssetLibrary(p).query(**a)
+            for r in result['items']:
+                r['media'] = ''
+                if r['exists'] and not r['error']:
+                    try: r['media'] = self.media_url(video_poster(p, r['file']) if r['kind']=='video' else r['file'])
+                    except Exception as e: r['error'] = '预览读取失败：'+str(e)
+            return result
+        if command == 'library.preview':
+            r = AssetLibrary(p).get(a['file'])
+            return self._version({'id':r['id'], 'file':r['file'], 'kind':r['kind'], 'time':r['time'], 'intent':r['prompt'], 'job':r['jobs'][0] if r['jobs'] else None})
+        if command == 'library.import':
+            kind = a['kind']
+            if kind not in ('image','video'): raise ValueError('素材类型无效')
+            paths = a.get('paths')
+            if paths is None:
+                paths = QFileDialog.getOpenFileNames(self.parent(),'导入图片' if kind=='image' else '导入视频','','图片 (*.png *.jpg *.jpeg *.webp)' if kind=='image' else '视频 (*.mp4 *.webm *.mkv)')[0]
+            if not isinstance(paths,list) or any(not isinstance(f,str) for f in paths): raise ValueError('请选择有效的素材文件')
+            for source in paths:
+                file=Path(source)
+                if not file.is_file() or file.suffix.lower() not in (IMAGE_SUFFIXES if kind=='image' else VIDEO_SUFFIXES): raise ValueError('素材不存在或格式不受支持')
+                stat=file.stat()
+                _metadata(str(file.resolve()),stat.st_size,stat.st_mtime_ns)
+            imported=[p.import_file(source) for source in paths]
+            self.save(); return imported
+        if command == 'context.add_media':
+            r = AssetLibrary(p).get(a['file'])
+            if not any(c['file']==r['file'] for c in self.media_context):
+                self.media_context.append({'file':r['file'], 'name':r['name'], 'kind':r['kind']})
+            self.publish(); return True
+        if command == 'context.remove':
+            if bool(a.get('id')) == bool(a.get('file')): raise ValueError('请选择一个要取消的引用')
+            if a.get('id'):
+                self.context_ids = [i for i in self.context_ids if i != a['id']]
+                if self.selected == a['id']: self.selected = None
+            else:
+                self.media_context = [c for c in self.media_context if c['file'] != a['file']]
+            self.publish(); return True
+        if command == 'context.clear':
+            self.selected = None; self.context_ids = []; self.media_context = []
+            self.publish(); return True
         if command == 'selection':
             ident = a.get('id')
             if ident: p.get(ident)
@@ -528,7 +585,7 @@ class StudioService(QObject):
             self.selected = None if a.get('toggle') and self.selected == ident else ident
             if a.get('pin') and ident and ident not in self.context_ids:
                 self.context_ids.append(ident)
-            if a.get('clear'): self.context_ids = []
+            if a.get('clear'): self.context_ids = []; self.media_context = []
             self.publish(); return True
         if command == 'asset.add':
             name = a.get('name', '') or (f"分镜 {len(p.data['shots'])+1}" if a['kind']=='shots' else '')
@@ -578,9 +635,15 @@ class StudioService(QObject):
             return self.defaults(a['target'], a.get('mode'))
         if command == 'generation.preview':
             g = self.parse_generation(a['generation'])
-            w, h = resolution(g.ratio, g.megapixels, 32 if g.mode.startswith(('h3','qwen')) else 8)
+            w, h = resolution(g.ratio, g.megapixels, 32 if g.mode.startswith('h3') or g.mode=='qwen_edit' else 8)
+            if g.mode=='qwen':
+                # The approved selector uses 8 px. Qwen's 16 px VAE then rounds
+                # the empty latent spatial size again in fix_empty_latent_channels.
+                w,h=max(16,round(w/16)*16),max(16,round(h/16)*16)
             if g.mode=='upscale' and g.references:
                 with Image.open(p.file(g.references[0])) as im: w, h = int(im.width*g.scale), int(im.height*g.scale)
+            if g.mode=='qwen_edit' and g.edit_follow_source and g.references:
+                with Image.open(p.file(g.references[0])) as im: w, h = max(32,round(im.width/32)*32), max(32,round(im.height/32)*32)
             return {'width':w,'height':h,'frames':frames(g.seconds),'seconds':frames(g.seconds)/24}
         if command == 'generation.submit':
             return self.submit(a['target'], a['generation'])

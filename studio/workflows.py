@@ -52,8 +52,10 @@ class Generation:
     references: list[str] = field(default_factory=list)
     # Defaults retain original BF16 workflow. Explicit low-memory option available.
     qwen_int8: bool = False
+    edit_follow_source: bool = True
 
     def validate(self):
+        if type(self.edit_follow_source) is not bool: raise ValueError('编辑输出尺寸选项无效')
         if self.mode not in MODES: raise ValueError('未知工作流')
         resolution(self.ratio, self.megapixels)
         frames(self.seconds)
@@ -76,7 +78,7 @@ def build(g: Generation, uploaded: list[str], prefix='AIStoryStudio'):
     def node(name, kind, **inputs):
         graph[name] = {'class_type':kind, 'inputs':inputs}
         return [name,0]
-    width,height=resolution(g.ratio,g.megapixels,32 if g.mode.startswith(('h3','qwen')) else 8)
+    width,height=resolution(g.ratio,g.megapixels,32 if g.mode.startswith('h3') or g.mode=='qwen_edit' else 8)
     refs=[node(f'ref{i}','LoadImage',image=p) for i,p in enumerate(uploaded)]
     if g.mode=='upscale':
         model=node('rf','RH_RFMSR_ModelLoader',checkpoint='rfmsr.safetensors',precision='bfloat16',memory_mode='unload_after_run')
@@ -112,18 +114,19 @@ def build(g: Generation, uploaded: list[str], prefix='AIStoryStudio'):
         unet=('qwen_image_2.1_int8_convrot.safetensors' if g.qwen_int8 else 'qwen_image_2.1_bf16.safetensors') if qwen else ('krea2_turbo_fp8_scaled.safetensors' if g.mode=='quad' else 'krea2_turbo_fp8.safetensors')
         clipname=('qwen3vl_8b_int8_convrot.safetensors' if g.qwen_int8 else 'qwen3vl_8b_bf16.safetensors') if qwen else 'qwen3vl_4b_fp8_scaled.safetensors'
         model=node('model','UNETLoader',unet_name=unet,weight_dtype='default')
+        if g.mode == 'qwen_edit':
+            model=node('qwen_cache','QwenImage21Cache',model=model,device='auto',dtype='default')
         clip=node('clip','CLIPLoader',clip_name=clipname,type='qwen_image' if qwen else 'krea2',device='default')
         vae=node('vae','VAELoader',vae_name='qwen_image_2.1_vae_bf16.safetensors' if qwen else 'qwen_image_vae.safetensors')
         latent=node('latent','EmptyLatentImage',width=width,height=height,batch_size=1)
         if qwen:
             extra={}
             if refs:
-                refs[0]=node('resize','ImageScale',image=refs[0],upscale_method='lanczos',width=width,height=height,crop='center')
                 extra['vae']=vae
                 extra.update({f'images.image_{i+1}':r for i,r in enumerate(refs)})
             positive=node('encode','TextEncodeQwenImage21',clip=clip,prompt=g.prompt,negative_prompt='',resolution=0 if refs else 1024,**extra)
             negative=['encode',1]
-            if refs:
+            if refs and g.edit_follow_source:
                 latent=['encode',2]
                 del graph['latent']
         elif g.mode=='quad':
@@ -139,7 +142,9 @@ def build(g: Generation, uploaded: list[str], prefix='AIStoryStudio'):
             negative=node('negative','ConditioningZeroOut',conditioning=positive)
         samples=node('sample','KSampler',model=model,positive=positive,negative=negative,latent_image=latent,seed=g.seed,steps=g.steps or (40 if qwen else 10 if g.mode=='quad' else 8),cfg=1.0,sampler_name='euler',scheduler='simple',denoise=1.0)
         out=node('decode','VAEDecode',samples=samples,vae=vae)
-    node('output','SaveImage',images=out,filename_prefix=prefix)
+    if g.mode.startswith('qwen'):
+        node('output','SaveImageAdvanced',images=out,filename_prefix=prefix,format='png',**{'format.bit_depth':'16-bit' if g.mode=='qwen' else '8-bit','format.input_color_space':'sRGB'})
+    else: node('output','SaveImage',images=out,filename_prefix=prefix)
     return graph
 
 def preflight(graph, info):

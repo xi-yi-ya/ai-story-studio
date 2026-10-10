@@ -1,17 +1,21 @@
-# XY Studio — v1.0.0
+# XY Studio — v1.1.0
 
 面向个人短故事创作者的 Windows 桌面工作台。Vue 3 是唯一正式界面，以 QWebEngineView + QWebChannel 连接原有 Python 后端；调用本机 ComfyUI，DeepSeek 用于对话、故事组织和生成建议。
 
 ## 启动
 
 1. 启动已安装节点和模型的 ComfyUI，默认 `http://127.0.0.1:8188`。
-2. 双击 `releases/v1.0.0/XY-Studio/XY-Studio.exe`。发布包需保留整个 XY-Studio 文件夹，不能只复制 EXE。
+2. 双击 `releases/v1.1.0/XY-Studio/XY-Studio.exe`。发布包需保留整个 XY-Studio 文件夹，不能只复制 EXE。
 3. 新建空项目文件夹，或打开已有 `project.json`。项目可放在任意可写目录。
 4. 在设置中填 DeepSeek API Key（可以暂时不填，手工生成正常使用）。密钥存入 Windows 凭据管理器，不写入项目或 Git。
 
 源码运行：Python 3.12，安装 `requirements.txt`，执行 `npm --prefix frontend ci` 和 `npm --prefix frontend run build`，再运行 `python main.py`。本机已创建 `.venv`，可运行 `run.ps1`。构建 Windows 包：`scripts/build.ps1`；不覆盖已有版本目录。开发测试：`python -m pytest tests --basetemp local-data/pytest-local`（仅用此专用临时目录）。
 
 ## 使用
+
+v1.1.0：新增当前项目图片库和视频库，汇总导入素材、全部生成文件、历史版本、未关联素材及删除条目后保留的结果。支持搜索、来源/归属筛选、分页、实际尺寸与时长、预览、定位来源及发送具体文件给 AI。生成参数窗口可从完整图片库选历史参考图。AI 增加两个只读资产查询工具；取消引用支持逐项移除和清空，即使当前没有选中卡片也能操作。取消作用于下一条消息，不撤回已发出的请求或旧聊天。详见 [本版交付说明](docs/RELEASE-v1.1.0.md)。
+
+图片生成默认使用用户指定的 Qwen Image 2.1 T2I：BF16，40 步，CFG 1，Euler/Simple，16-bit PNG，6.6 MP 可调。尺寸选择按 8 对齐，界面预计输出另考虑 Qwen VAE 的 16 像素对齐。已有图片默认打开 Qwen 编辑：INT8、原始参考不裁剪、默认沿用第一张图尺寸（32 对齐），可明确改为自定义比例/MP。编辑保存 8-bit PNG。Krea2、四视图及 INT8/BF16 选择仍保留；历史任务重试保持原工作流。两份最新批准文件的哈希及对应配置见 [工作流来源](docs/workflow-sources-v1.1.0.json)。
 
 v1.0.0 是首个正式冻结版本：沿用已验收的 Vue 桌面界面，完成以下 v0.3.3 修复并经过正式包验收。旧项目与 Windows 凭据兼容，旧版保留供回退。冻结说明、测试结果和边界见 [正式版交付说明](docs/RELEASE-v1.0.0.md)。学习后端可阅读 [Java 对照开发文档](docs/JAVA-DEVELOPER-GUIDE.md)；文档用 Java 解释现有实现，应用继续使用 Python 后端。
 
@@ -52,7 +56,7 @@ v0.1.2：三个页面均纵向排列整行卡片。新增分镜无需预输入�
 
 | 功能 | 工作流与控制 |
 |---|---|
-| Qwen Image 2.1 文生图 / 编辑 | BF16 原配置；可显式选本机 INT8；MP、比例；最多 16 张编辑参考 |
+| Qwen Image 2.1 文生图 / 编辑 | 文生图默认 BF16/16-bit PNG；编辑默认 INT8/8-bit PNG、沿用主图尺寸；支持自定义 MP、比例及最多 16 张编辑参考 |
 | Krea2 文生图 | 9 种风格 LoRA 分别启停，启用时自动附对应触发词 |
 | Krea2 角色四视图 | QuadView LoRA 启停，参考图和输出尺寸 |
 | H3 图生视频 | 10Eros beta4 INT8，电影 LoRA 启停和强度，比例、MP、秒数 |
@@ -67,7 +71,7 @@ v0.1.2：三个页面均纵向排列整行卡片。新增分镜无需预输入�
 
 - DeepSeek 已验证桌面发送/接收，以及真实 API 保存故事、Qwen 改图、下一轮引用新图生成 H3 视频。模型名在设置中可改，实测 deepseek-flash。未实现同一批建议自动等待未来输出并串联所有生成任务。
 - H3 使用 24fps，按原表达式向上对齐为 `17k+5` 帧。输入 2 秒得到 56 帧，约 2.33 秒；界面显示实际时长。默认低规格方便首测，高规格没有可运行保证。
-- Qwen 编辑将第一张参考图居中裁剪到所选输出尺寸；其他参考保持各自比例。普通图片保存为 8-bit PNG，未保留原 Qwen SaveImageAdvanced 的 16-bit 导出。
+- Qwen 编辑参考不做居中裁剪，默认按第一张图尺寸生成；自定义尺寸另选输出画布。文生图保存原始 16-bit PNG，浏览器预览不等同于 16-bit 色彩审片。
 - H3 参考模式本版只接图片；视频参考、音频参考、时间线剪辑、成片拼接、自动连续性审片尚未实现。
 - 版本记录保存生成意图、参数、引用素材快照；没有完整的素材分支合并或镜头首尾帧自动比较。
 - 程序不安装/下载模型，不改写用户 ComfyUI 工作流，不打包模型。需要同样的节点和模型文件名。`docs/workflow-sources.json` 记录六份批准来源的文件哈希。

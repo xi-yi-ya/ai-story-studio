@@ -1,4 +1,4 @@
-# XY Studio v1.0.0 开发文档：用 Java 理解 Python 后端
+# XY Studio 开发文档：用 Java 理解 Python 后端
 
 本文面向熟悉 Java、暂时不熟悉 Python 的开发者。先说明软件如何运行，再把关键 Python 代码翻译成 Java 风格的示例，最后说明如何定位和修改功能。
 
@@ -246,7 +246,7 @@ class Generation {
 
 ### 5.1 比例、尺寸和时间
 
-`resolution()` 将比例和像素预算换成宽高，并对齐到模型所需倍数。H3/Qwen 的预览通常按 32 对齐，Krea 按 8 对齐。放大预览按输入尺寸乘倍数计算。
+`resolution()` 将比例和像素预算换成宽高。H3 与 Qwen 编辑自定义画布按 32 对齐；Krea 按 8 对齐。v1.1.0 的 Qwen T2I 按批准工作流使用 8 像素选择器，实际空 latent 经 16 像素 VAE 再对齐；界面预计输出按这一步计算。编辑默认使用原始第一张参考图，经编码器按 32 对齐，不再预先居中裁剪。放大预览按输入尺寸乘倍数计算。
 
 `frames()` 使用 24 fps，把帧数对齐到 `5 + 17k`。Java 算法对照：
 
@@ -458,3 +458,36 @@ Python 回归：
 接着读 `deepseek.py` 的 `TOOLS/chat` 和 Service 的 `_next_review/review`，理解 AI 为什么只能建议而不能直接越过审阅。最后对照 `gateway.ts`、Pinia Store 和 `TaskProgress.vue`，把整个“点击 → 后端 → 状态 → 页面”流程连起来。
 
 学习时可在专用项目中创建两个角色，为第一个排队后切换选中第二个，观察结果仍归属第一个；再切换当前版本，观察历史页仍显示各次原图。这个例子同时解释了 ID、异步任务、版本和展示 DTO 的关系。
+
+## 12. v1.1.0：素材查询与可取消引用
+
+`AssetLibrary` 是项目文件的只读查询层。它合并条目的 `versions`、当前图片/视频、任务 `outputs`，并扫描项目内 `assets/outputs` 原文件。按相对路径去重，所以同一文件既是当前版本又在历史记录中，只列一次；`previews` 缓存排除。索引 ID 是相对路径的哈希，仅用于界面，不保存成新的角色/场景 ID。
+
+Java 中可理解为先用 `Map<String, MediaRecord>` 按路径聚合，再查询、过滤、排序和分页。下面是概念片段，并非可运行的 Java 迁移实现：
+
+```java
+record LibraryQuery(String kind, String query, String source,
+                    String owner, int offset, int limit) {}
+record LibraryPage(long total, List<MediaRecord> items, boolean hasMore) {}
+
+LibraryPage query(LibraryQuery q) {
+    validate(q); // 检查枚举、分页、类型
+    List<MediaRecord> matches = inventory().stream()
+        .filter(r -> matchesQuery(r, q))
+        .sorted(selectedComparator(q))
+        .toList();
+    var items = matches.stream().skip(q.offset()).limit(q.limit()).toList();
+    return new LibraryPage(matches.size(), items,
+                           q.offset() + q.limit() < matches.size());
+}
+```
+
+真实 Python 文件在 `studio/asset_library.py`。只对当前页读取 Pillow/PyAV 元数据，按路径、文件大小、修改时间缓存探测结果；文件变化会重新读取。GUI 的 `library.query` 额外补可播放封面 URL，Agent 查询只拿元数据，不把 URL 或像素当成视觉理解。
+
+`selected`、`context_ids`、`media_context` 分别表示当前讨论对象、固定对象引用、具体文件引用。移除对象时同时取消相同选中对象，防止下一轮又因 `selected` 自动加入；移除文件只影响那个文件。Java 等价操作是 `Set.remove(id)` 和 `attachments.removeIf(a -> a.file().equals(file))`。这不删除素材，也不撤回已发送的 HTTP 请求。
+
+聊天启动时深复制当前项目和引用，再把 `AssetLibrary.query` 作为回调传给 `chat()`。Java 可类比传入一个 `Function<LibraryQuery, LibraryPage>`，工作线程使用稳定快照，不直接访问 UI 线程的可变 `Project`。只读工具在当前轮临时上下文中使用，写操作仍由原 Service 审阅；工具数量上限防止无界循环。
+
+Qwen T2I 默认与新批准文件一致：BF16、40 步、16-bit PNG、6.6 MP 可调；已有图片默认进入编辑。编辑尺寸选择是 `Generation.edit_follow_source`，但保存时从 `job.generation` 中移出，另写到任务顶层，执行器再读取。这样冻结 v1.0.0 的 `Generation(**job['generation'])` 不会遇到未知参数。原 schema、项目 ID 和原图保持不变；新旧 DTO 的展示字段与持久化字段需要分别考虑。
+
+本版额外真实验证脚本为 `qwen-live.mjs` 与 `asset-query-live.mjs`，分别调用真实 ComfyUI 和 DeepSeek，不属于默认离线测试。素材库测试需要专用项目副本和真实旧结果；最新记录见 [v1.1.0 验收](VALIDATION-v1.1.0.json)。

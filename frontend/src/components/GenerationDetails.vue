@@ -10,7 +10,7 @@ const materialNames = computed(() => (props.materials || []).flatMap(m => typeof
   <div class="generation-details">
     <dl v-if="generation">
       <div><dt>生成方式</dt><dd>{{ store.state?.catalog.modes[generation.mode] || '原生成方式' }}</dd></div>
-      <div v-if="generation.mode !== 'upscale'"><dt>画面设置</dt><dd>{{ generation.ratio }} · {{ generation.megapixels }} MP</dd></div>
+      <div v-if="generation.mode !== 'upscale'"><dt>画面设置</dt><dd>{{generation.mode==='qwen_edit' && generation.edit_follow_source!==false?'沿用主参考图尺寸':`${generation.ratio} · ${generation.megapixels} MP`}}</dd></div>
       <div v-if="generation.mode.startsWith('h3')"><dt>设置时长</dt><dd>{{ generation.seconds }} 秒</dd></div>
       <div v-if="generation.mode === 'upscale'"><dt>放大倍数</dt><dd>{{ generation.scale }}×</dd></div>
       <div><dt>采样步数</dt><dd>{{ generation.steps || '沿用默认设置' }}</dd></div>

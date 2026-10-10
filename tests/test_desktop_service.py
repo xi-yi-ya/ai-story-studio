@@ -78,6 +78,102 @@ def test_selection_toggle_is_atomic_without_clearing_pinned_context(service):
     assert s.selected==shot  # Timeline navigation remains idempotent.
 
 
+def test_context_removal_works_when_selection_is_empty_and_exact_media_stays_separate(service, tmp_path):
+    s=service
+    a=call(s,'asset.add',kind='characters',name='人物'); b=call(s,'asset.add',kind='scenes',name='舞台')
+    source=tmp_path/'input.png';Image.new('RGB',(64,96),'blue').save(source)
+    file=call(s,'asset.import',id=a,paths=[str(source)])[0]
+    call(s,'selection',id=a,pin=True);call(s,'selection',id=b,pin=True)
+    call(s,'selection',id=b,toggle=True)
+    call(s,'context.add_media',file=file);call(s,'context.add_media',file=file)
+    call(s,'context.remove',id=a)
+    assert s.selected is None and s.context_ids==[b]
+    assert len(s.snapshot()['mediaContext'])==1
+    call(s,'selection',id=b);call(s,'context.remove',id=b)
+    assert s.selected is None and s.context_ids==[]
+    call(s,'context.remove',file=file)
+    assert s.media_context==[] and s.project.file(file).exists()
+    call(s,'context.add_media',file=file);call(s,'selection',id=a,pin=True)
+    call(s,'context.clear')
+    assert s.selected is None and s.context_ids==[] and s.media_context==[]
+    assert len(s.project.data['characters'])==1
+
+
+def test_asset_query_uses_chat_snapshot_and_cancelled_references_do_not_enter_next_round(service,tmp_path,monkeypatch):
+    s=service;a=call(s,'asset.add',kind='characters',name='人物')
+    source=tmp_path/'input.png';Image.new('RGB',(64,96),'blue').save(source)
+    file=call(s,'asset.import',id=a,paths=[str(source)])[0]
+    call(s,'selection',id=a,pin=True);call(s,'context.add_media',file=file)
+    call(s,'context.remove',id=a);call(s,'context.remove',file=file)
+    captured={}
+    monkeypatch.setattr(module.keyring,'get_password',lambda *args:'test-only')
+    def fake_chat(key,model,history,context,**kwargs):captured.update(context=context,query=kwargs['asset_query']);return {'role':'assistant','content':'结果'}
+    monkeypatch.setattr(module,'chat',fake_chat)
+    monkeypatch.setattr(s,'_spawn',lambda kind,fn:fn())
+    s._start_chat()
+    assert captured['context']['selected_ids']==[] and captured['context']['media_attachments']==[]
+    s.project.get(a)['name']='新的名字'
+    rows=captured['query']('image')['items']
+    assert rows[0]['owners'][0]['name']=='人物' and rows[0]['file']==file
+
+
+def test_query_and_preview_use_real_files_and_edit_preview_matches_source(service,tmp_path):
+    s=service;a=call(s,'asset.add',kind='characters',name='人物')
+    source=tmp_path/'input.png';Image.new('RGB',(438,247),'blue').save(source)
+    file=call(s,'asset.import',id=a,paths=[str(source)])[0]
+    result=call(s,'library.query',kind='image')
+    assert result['items'][0]['file']==file and result['items'][0]['media'].endswith(file)
+    assert call(s,'library.preview',file=file)['kind']=='image'
+    generation=call(s,'generation.defaults',target=a,mode='qwen_edit')
+    assert generation['qwen_int8'] and generation['edit_follow_source']
+    preview=call(s,'generation.preview',generation=generation)
+    assert (preview['width'],preview['height'])==(448,256)
+    generation.update(edit_follow_source=False,ratio='1:1',megapixels=.1,prompt='调整测试图片的背景')
+    preview=call(s,'generation.preview',generation=generation)
+    assert (preview['width'],preview['height'])==(320,320)
+    s.project.data['queue_paused']=True
+    call(s,'generation.submit',target=a,generation=generation)
+    stored=s.project.data['jobs'][-1]
+    assert stored['edit_follow_source'] is False and 'edit_follow_source' not in stored['generation']
+
+
+def test_default_new_image_uses_approved_qwen_t2i_and_existing_image_uses_edit(service):
+    s=service;target=call(s,'asset.add',kind='characters',name='人物',description='描述')
+    s.project.data['jobs'].append({'id':'prior-krea','target':target,'generation':asdict(Generation(mode='krea',prompt='之前的提示词')),'status':'cancelled'})
+    defaults=call(s,'generation.defaults',target=target)
+    assert defaults['mode']=='qwen' and defaults['megapixels']==6.6 and not defaults['qwen_int8']
+    preview=call(s,'generation.preview',generation=defaults)
+    assert (preview['width'],preview['height'])==(3504,1984)
+    s.project.get(target)['image']='assets/placeholder.png'
+    assert call(s,'generation.defaults',target=target)['mode']=='qwen_edit'
+
+
+def test_library_import_validates_batch_and_video_cannot_be_an_image_reference(service,tmp_path):
+    import av
+    s=service; target=call(s,'asset.add',kind='shots')
+    source=tmp_path/'image.png';Image.new('RGB',(64,96),'blue').save(source)
+    clip=tmp_path/'clip.webm'
+    with av.open(str(clip),'w') as container:
+        stream=container.add_stream('libvpx-vp9',rate=24)
+        stream.width,stream.height,stream.pix_fmt=64,48,'yuv420p'
+        frame=av.VideoFrame.from_image(Image.new('RGB',(64,48),'green'))
+        for packet in stream.encode(frame):container.mux(packet)
+        for packet in stream.encode():container.mux(packet)
+    before=list(s.project.file('assets').iterdir())
+    with pytest.raises(ValueError):call(s,'library.import',kind='image',paths=[str(source),str(clip)])
+    assert list(s.project.file('assets').iterdir())==before
+    file=call(s,'library.import',kind='video',paths=[str(clip)])[0]
+    result=call(s,'library.query',kind='video')
+    assert result['total']==1 and result['items'][0]['source']=='imported'
+    assert result['items'][0]['duration']>0 and result['items'][0]['media']
+    call(s,'context.add_media',file=file)
+    assert s.snapshot()['mediaContext'][0]['kind']=='video'
+    s.project.data['queue_paused']=True
+    with pytest.raises(ValueError,match='图片'):
+        call(s,'generation.submit',target=target,generation=asdict(Generation(mode='qwen_edit',prompt='测试',references=[file])))
+    assert s.project.data['jobs']==[]
+
+
 def test_task_result_thumbnails_keep_each_output_after_version_changes_and_deletion(service):
     s=service;target=call(s,'asset.add',kind='scenes',name='舞台')
     s.project.data['queue_paused']=True

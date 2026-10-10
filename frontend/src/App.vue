@@ -55,6 +55,7 @@ import SettingsPanel from "./components/SettingsPanel.vue";
 import TaskProgress from "./components/TaskProgress.vue";
 import GenerationDetails from "./components/GenerationDetails.vue";
 import MessageText from "./components/MessageText.vue";
+import MediaLibrary from "./components/MediaLibrary.vue";
 
 const store = useStudio();
 const nav = [
@@ -62,6 +63,8 @@ const nav = [
   { page: "characters", title: "角色资产", icon: UsersRound },
   { page: "scenes", title: "场景资产", icon: Mountain },
   { page: "shots", title: "分镜工作区", icon: Clapperboard },
+  { page: "images", title: "图片库", icon: ImagePlus },
+  { page: "videos", title: "视频库", icon: Film },
   { page: "tasks", title: "任务与历史", icon: ListTodo },
 ] as const;
 const titles: Record<Page, string> = {
@@ -69,6 +72,8 @@ const titles: Record<Page, string> = {
   characters: "角色资产",
   scenes: "场景资产",
   shots: "分镜工作区",
+  images: "图片资产库",
+  videos: "视频资产库",
   tasks: "任务与历史",
   settings: "工作台设置",
 };
@@ -77,6 +82,8 @@ const subtitles: Record<Page, string> = {
   characters: "让故事里的每个人，有自己的模样。",
   scenes: "为你的故事，搭建一个可以回到的世界。",
   shots: "把想象连成镜头，让故事慢慢发生。",
+  images: "导入和生成的每个版本，都能在这里找到。",
+  videos: "查找已经生成或导入的片段，回到它所属的镜头。",
   tasks: "每一次尝试，都留在它所属的故事里。",
   settings: "按照你的习惯，安排创作空间。",
 };
@@ -209,6 +216,20 @@ async function locate(id: string) {
     .getElementById(`shot-${id}`)
     ?.scrollIntoView({ block: "start", behavior: "smooth" });
 }
+async function locateMedia(id:string){
+ const shot=store.project.shots.find(s=>s.id===id),asset=store.project.assets.find(a=>a.id===id);
+ if(!shot && !asset){store.notify('原条目已删除，素材文件仍可使用');return;}
+ navigate(shot?'shots':asset!.kind);
+ store.select(id);if(shot)store.fold(id,false);
+ await nextTick();document.querySelector(`[data-testid="${shot?'shot':'asset'}-${id}"]`)?.scrollIntoView({block:'center'});
+}
+watch(()=>store.state,async()=>{
+ const v=preview.value;
+ if(modal.value==='preview' && v?.kind==='video' && !v.url && v.error==='正在准备兼容预览'){
+  const fresh=await store.previewMedia(v.file);
+  if(modal.value==='preview' && preview.value?.id===v.id)preview.value=fresh;
+ }
+});
 async function addShot() {
   const id = await store.newShot();
   locate(id);
@@ -515,6 +536,7 @@ onMounted(() => {
                 <button class="btn" @click="search = ''">清除搜索</button>
               </div>
             </template>
+            <template v-else-if="store.page==='images' || store.page==='videos'"><MediaLibrary :kind="store.page==='images'?'image':'video'" @preview="openPreview" @locate="locateMedia"/></template>
             <template v-else-if="store.page === 'projects'">
   <div class="project-grid"><button v-for="p in store.projects" :key="p.id" class="project-card surface" @click="store.openProject(p.id)"><div class="project-cover"><FolderOpen :size="32" :stroke-width="1.3"/></div><div><span class="project-card-caption">最近打开的项目</span><h3>{{p.name}}</h3><p>{{p.story}}</p><footer>打开项目<ArrowUpRight :size="16"/></footer></div></button></div>
   <section class="welcome-note"><span class="welcome-icon"><Sparkles :size="23"/></span><div><h3>从一个想法，到一个完整的故事。</h3><p>打开已有 project.json，或在新文件夹创建项目。旧项目的素材、关联关系和历史会保留。</p><div class="flex gap-3 mt-4"><button class="btn btn-primary" @click="store.openProject()"><FolderOpen :size="15"/>打开项目</button><button v-if="store.hasProject" class="btn" @click="store.folder"><ExternalLink :size="15"/>打开项目文件夹</button></div></div></section>

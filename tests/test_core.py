@@ -21,7 +21,19 @@ def test_graphs_closed_and_output(mode):
     for node in graph.values():
         for x in node['inputs'].values():
             if isinstance(x,list):assert x[0] in graph
-    assert graph['output']['class_type']==('SaveVideo' if mode.startswith('h3') else 'SaveImage')
+    assert graph['output']['class_type']==('SaveVideo' if mode.startswith('h3') else 'SaveImageAdvanced' if mode.startswith('qwen') else 'SaveImage')
+
+
+def test_qwen_t2i_matches_approved_precision_sampling_and_export():
+    graph=build(Generation(prompt='测试',megapixels=6.6),[])
+    assert graph['model']['inputs']['unet_name']=='qwen_image_2.1_bf16.safetensors'
+    assert graph['clip']['inputs']['clip_name']=='qwen3vl_8b_bf16.safetensors'
+    assert graph['vae']['inputs']['vae_name']=='qwen_image_2.1_vae_bf16.safetensors'
+    sample=graph['sample']['inputs']
+    assert (sample['steps'],sample['cfg'],sample['sampler_name'],sample['scheduler'],sample['denoise'])==(40,1,'euler','simple',1)
+    assert graph['encode']['inputs']['resolution']==1024
+    assert (graph['latent']['inputs']['width'],graph['latent']['inputs']['height'])==resolution('16:9',6.6,8)
+    assert graph['output']['inputs']['format.bit_depth']=='16-bit'
 
 def test_lora_disable_rewires_both_h3_consumers():
     g=Generation(mode='h3_i2v',prompt='test',references=['x'],cinema=True)
@@ -39,9 +51,15 @@ def test_style_switches_and_quad():
 def test_edit_geometry_and_reference_order():
     g=Generation(mode='qwen_edit',prompt='change hat',references=['a','b'])
     graph=build(g,['uploaded-a','uploaded-b'])
-    assert graph['encode']['inputs']['images.image_1']==['resize',0]
+    assert graph['encode']['inputs']['images.image_1']==['ref0',0]
     assert graph['encode']['inputs']['images.image_2']==['ref1',0]
     assert graph['sample']['inputs']['latent_image']==['encode',2]
+    assert 'resize' not in graph and 'latent' not in graph
+    assert graph['sample']['inputs']['model']==['qwen_cache',0]
+    g.edit_follow_source=False
+    custom=build(g,['uploaded-a','uploaded-b'])
+    assert custom['sample']['inputs']['latent_image']==['latent',0]
+    assert custom['encode']['inputs']['images.image_1']==['ref0',0]
 
 def test_project_roundtrip_versions_and_path_safety(tmp_path):
     p=Project(tmp_path/'p',True);a=p.add('characters','robot');s=p.add('shots','01');s['materials']=[a['id']];p.save()
@@ -60,6 +78,25 @@ def test_ai_bounded_tools_and_no_key():
     for name,args in [('delete_file',{}),('set_story',{'text':9}),('set_story',{'text':'x','command':'rm'}),('add_item',{'kind':'bad','name':'x','description':'x'})]:
         with pytest.raises(ValueError):validate_action(name,args)
     with pytest.raises(ValueError):chat('','model',[],{})
+
+
+def test_read_only_asset_tools_are_available_offline_and_do_not_become_project_actions(monkeypatch):
+    requests=[];queries=[]
+    class Response:
+        ok=True
+        def json(self):
+            if len(requests)==1:
+                return {'choices':[{'message':{'role':'assistant','content':None,'tool_calls':[{'id':str(i),'function':{'name':name,'arguments':'{"source":"generated","offset":0,"limit":20}'}} for i,name in enumerate(('query_image_assets','query_video_assets'))]}}]}
+            return {'choices':[{'message':{'role':'assistant','content':'查询已完成。'}}]}
+    def post(url,**kwargs):requests.append(kwargs['json'].copy());return Response()
+    def query(**args):queries.append(args);return {'total':2,'items':[{'file':'outputs/a.png'}]}
+    monkeypatch.setattr('studio.deepseek.requests.post',post)
+    message=chat('test-only','test-model',[],{},asset_query=query)
+    names={t['function']['name'] for t in requests[0]['tools']}
+    assert {'query_image_assets','query_video_assets'}<=names and 'web_search' not in names
+    assert [q['kind'] for q in queries]==['image','video']
+    assert len(message['_activity'])==2 and not message.get('tool_calls')
+    with pytest.raises(ValueError):validate_action('query_image_assets',{'limit':True})
 
 class Fake:
     def __init__(self,root):self.submits=0;self.root=root
