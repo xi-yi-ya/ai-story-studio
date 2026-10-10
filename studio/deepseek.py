@@ -36,6 +36,7 @@ SYSTEM = """你是桌面 AI 故事制作工作台的创作助手。用中文交�
 - 工具执行结果会回传。用户原本要求生成图片时，创建条目成功后必须继续调用 generate，不能只说将生成或仅交付提示词。用户只要求创建或写提示词时不得生成。取消、失败时停止该操作，不重复创建。
 - 回复简洁，技能在内部使用，不展示路径判定、规则复述、细节预算等教学分析，除非用户询问。生成操作会直接打开参数确认窗口，不必额外口头索要一次确认。
 - 最终回复的解释部分请用中文，不把指南示例里的英文说明照搬到聊天中。
+- 用户不需要技术知识。普通回复只描述创作内容、执行状态及需要确认的操作；不要输出内部执行记录 JSON、工具调用参数、Skill 名称、SKILL.md、指南文件路径或条目/任务 ID。需要的参数在界面展示。用户明确索要创作提示词或数据格式时可交付所需正文，不能夹带内部日志。
 """
 
 SYSTEM += '\n可读取的技能目录：\n'+json.dumps(CATALOG,ensure_ascii=False)
@@ -80,7 +81,7 @@ def chat(key,model,messages,context,online=False,notify=lambda text:None):
     loaded=set();activity=[];search_count=0;repairs=0
     def load(skill,file):
         content=read_skill(skill,file);loaded.add((skill,file))
-        activity.append({'type':'skill','skill':skill,'file':file});notify('读取技能：'+skill+'/'+file)
+        activity.append({'type':'skill','skill':skill,'file':file});notify('正在准备视频创作建议' if skill=='h3' else '正在准备图片创作建议')
         return content
     for turn in range(8):
         notify('AI 思考中（'+model+'）')
@@ -111,7 +112,11 @@ def chat(key,model,messages,context,online=False,notify=lambda text:None):
             if name=='generate':missing |= required_guides(args['mode'])-loaded
         if missing:
             docs=[skill+'/'+file+'\n'+load(skill,file) for skill,file in sorted(missing)]
-            payload['messages'].append({'role':'user','content':'上一份建议未通过技能读取检查，尚未执行。应用按生成模式读取以下指南；请依照它们重新给出完整建议：\n'+'\n'.join(docs)})
+            # A generate call was already proposed. After loading its missing
+            # guides, keep the retry on the reviewable tool path instead of
+            # degrading into prompt-only prose or a fictitious dialog.
+            payload['tool_choice']='required'
+            payload['messages'].append({'role':'user','content':'上一项生成操作未通过指南检查，尚未执行。应用已准备好以下创作指南。请依照指南重新通过工具提出完整生成操作，等待用户在界面审阅，不要只返回提示词，不要声称窗口已经打开。中文回复只说明修改内容，不复述技能、文件、目录或内部参数：\n'+'\n'.join(docs)})
             continue
         try:
             for _,name,args in parsed:

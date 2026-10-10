@@ -1,17 +1,21 @@
-# XY Studio — v0.3.2
+# XY Studio — v1.0.0
 
 面向个人短故事创作者的 Windows 桌面工作台。Vue 3 是唯一正式界面，以 QWebEngineView + QWebChannel 连接原有 Python 后端；调用本机 ComfyUI，DeepSeek 用于对话、故事组织和生成建议。
 
 ## 启动
 
 1. 启动已安装节点和模型的 ComfyUI，默认 `http://127.0.0.1:8188`。
-2. 双击 `releases/v0.3.2/XY-Studio/XY-Studio.exe`。发布包需保留整个 XY-Studio 文件夹，不能只复制 EXE。
+2. 双击 `releases/v1.0.0/XY-Studio/XY-Studio.exe`。发布包需保留整个 XY-Studio 文件夹，不能只复制 EXE。
 3. 新建空项目文件夹，或打开已有 `project.json`。项目可放在任意可写目录。
 4. 在设置中填 DeepSeek API Key（可以暂时不填，手工生成正常使用）。密钥存入 Windows 凭据管理器，不写入项目或 Git。
 
 源码运行：Python 3.12，安装 `requirements.txt`，执行 `npm --prefix frontend ci` 和 `npm --prefix frontend run build`，再运行 `python main.py`。本机已创建 `.venv`，可运行 `run.ps1`。构建 Windows 包：`scripts/build.ps1`；不覆盖已有版本目录。开发测试：`python -m pytest tests --basetemp local-data/pytest-local`（仅用此专用临时目录）。
 
 ## 使用
+
+v1.0.0 是首个正式冻结版本：沿用已验收的 Vue 桌面界面，完成以下 v0.3.3 修复并经过正式包验收。旧项目与 Windows 凭据兼容，旧版保留供回退。冻结说明、测试结果和边界见 [正式版交付说明](docs/RELEASE-v1.0.0.md)。学习后端可阅读 [Java 对照开发文档](docs/JAVA-DEVELOPER-GUIDE.md)；文档用 Java 解释现有实现，应用继续使用 Python 后端。
+
+v0.3.3：任务历史直接显示每次生成的图片及视频封面，可点击放大；查看结果只展示该次输出，切换当前版本不会改变旧记录。AI 对话、操作确认及生成详情改为中文说明，不再直接展示内部 Skill、指南路径或工具 JSON；联网来源和错误提示保留，原始记录不改写。数字进度已在用户授权重启 ComfyUI 后完成真实图片和低规格 H3 验证。按用户决定，不开发一句话自动串联视频制作。详见 [交付说明](docs/RELEASE-v0.3.3.md)。
 
 v0.3.2：重复点击角色、场景、分镜图片可以取消选中，双击查看和时间轴定位仍保留上下文。新增统一的真实节点进度条，覆盖素材卡片、分镜、全局当前任务和任务列表；未返回步数的阶段只显示状态，不推算百分比。Agent 连续生成方案见 [方案说明](docs/AGENT-CONTINUATION-PLAN.md)，本版未实施生成完成后的自动串联。
 

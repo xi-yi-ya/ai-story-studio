@@ -1,0 +1,460 @@
+# XY Studio v1.0.0 开发文档：用 Java 理解 Python 后端
+
+本文面向熟悉 Java、暂时不熟悉 Python 的开发者。先说明软件如何运行，再把关键 Python 代码翻译成 Java 风格的示例，最后说明如何定位和修改功能。
+
+实际交付的软件仍是 Vue 3 + Python。下面的 Java 片段是帮助理解的局部对照，不是一套已经完成迁移、可以直接替代后端的 Java 工程。示例中的 Repository、事件分发器等接口用于表达职责；Python 源码才是运行行为的依据。
+
+文内相对源码链接以源代码仓库的 `docs/` 目录为基准。发行包附带本文便于阅读；查看这些源码链接时，请打开原私密仓库中的文档。
+
+## 1. 先认识整个工程
+
+XY Studio 是 Windows 桌面应用。Vue 负责画界面，Python 负责项目、队列、AI 和 ComfyUI。正式入口是 `main.py`，它调用 `studio.desktop.main()`。
+
+```mermaid
+flowchart LR
+    V[Vue 页面与 Pinia] -->|命令 JSON| B[QWebChannel 桥接]
+    B --> S[StudioService 主线程]
+    S --> P[Project 项目数据]
+    S --> W[后台网络工作线程]
+    W --> D[DeepSeek]
+    W --> C[独立运行的 ComfyUI]
+    W -->|结果与进度事件| S
+    S -->|状态快照| V
+    M[本机媒体 HTTP 服务] -->|图片与视频| V
+```
+
+这里的 QWebEngineView 可以理解为桌面窗口中的浏览器容器。它显示 Vue 页面，原来的 Qt Widgets 业务界面已经不再是正式入口。QWebChannel 负责业务通信。本机 HTTP 服务只提供 Vue 静态文件和项目媒体，不承担业务 API，也不是一个独立 Python 服务进程。
+
+从 Java 的习惯理解，可以把几个部分对应成：
+
+| 当前实现 | Java 开发中的相近职责 | 源码 |
+|---|---|---|
+| `Desktop` | 桌面启动器、窗口和生命周期管理 | [desktop.py](../studio/desktop.py) |
+| `Bridge` | 请求适配器、统一响应包装 | [desktop.py](../studio/desktop.py) |
+| `StudioService` | Application Service / Controller | [service.py](../studio/service.py) |
+| `Project` | 项目聚合对象与文件 Repository | [storage.py](../studio/storage.py) |
+| `Generation` | 生成参数 DTO，附校验方法 | [workflows.py](../studio/workflows.py) |
+| `Comfy`、`execute` | 外部系统 Client、任务执行器 | [comfy.py](../studio/comfy.py) |
+| `chat` | 有调用上限的 AI 建议服务 | [deepseek.py](../studio/deepseek.py) |
+| `display_chat_text` | 只影响展示的转换器 | [presentation.py](../studio/presentation.py) |
+| Pinia Store | 前端状态容器 | [studio.ts](../frontend/src/stores/studio.ts) |
+| Gateway | 请求 Promise 与事件桥接 | [gateway.ts](../frontend/src/gateway.ts) |
+
+没有 Spring 容器、数据库 ORM 或 Java 后端；这些对应只是方便理解职责。
+
+## 2. 阅读 Python 所需的最少语法
+
+| Python 写法 | Java 中如何理解 |
+|---|---|
+| `class Project:` | `class Project { ... }`；缩进界定代码块 |
+| `def save(self):` | 实例方法 `void save()`；`self` 相当于 `this` |
+| `def __init__(self, root):` | 构造函数 `Project(Path root)` |
+| `self.root = root` | `this.root = root` |
+| `dict` / `{'id': value}` | `Map<String, Object>`；当前工程大量使用 JSON 形状的字典 |
+| `list` / `[a, b]` | `List<T>` |
+| `None` | `null` |
+| `value.get('id')` | `map.get("id")`；可传第二个参数作为缺省值 |
+| `value['id']` | 必须存在的键；缺失会抛异常，而不是返回 `null` |
+| `@dataclass` | 自动补构造函数等的 DTO；不像 Java `record` 那样自动成为不可变对象 |
+| `@Slot(str, object)`、`Signal(...)` | Qt 的事件接收方法与事件声明；不是 Spring 注解 |
+| `lambda: fn()` | `() -> fn()` |
+| `copy.deepcopy(x)` | 对嵌套集合做深复制；`new ArrayList<>(x)` 只有浅复制，不能直接替代 |
+| `try ... except ... finally` | `try ... catch ... finally` |
+| `raise ValueError(...)` | `throw new IllegalArgumentException(...)` |
+| `with file.open(...) as f:` | `try (var f = ...)` 自动关闭资源 |
+| `asdict(g)` | 将参数对象转成字典；相近于 DTO 转 Map，不等于序列化成 JSON 字符串 |
+
+列表推导式例如 `[j for j in jobs if j['target'] == id]`，相近于 Java Stream 的 `filter(...).toList()`。`next(generator, None)` 是取第一个匹配项，找不到返回 `None`，相近于 `findFirst().orElse(null)`。
+
+特别留意 `x or default`：Python 会把空字符串、空列表、0、`None` 等都当作假值；不能机械翻成 Java 的空值判断。
+
+## 3. 项目数据：稳定 ID 比列表位置更重要
+
+一个项目是一个文件夹，主要内容如下：
+
+```text
+我的项目/
+  project.json               项目、条目、对话和任务索引
+  assets/                    导入的参考素材
+  outputs/<job-id>/          每项任务下载保存的输出
+  jobs/<job-id>.json         单项任务日志，用于恢复
+  jobs/<job-id>-graph.json   实际提交的生成图
+```
+
+视频预览还可能产生派生缓存，实际路径由 `video_preview.py` 管理。输出原文件保留，不能把预览转码文件当成用户原始资产。
+
+`project.json` 的 `schema` 当前为 1，包含 `characters`、`scenes`、`shots`、`jobs`、`chat` 等字段。角色、场景、分镜都具备 `id`、`name`、`description`、`image`、`video`、`materials` 和 `versions`。不要把前端 DTO 的字段直接写回项目 JSON。
+
+用 Java 表达概念：
+
+```java
+// 概念模型：省略 JSON 映射、时间和可选字段。
+class Item {
+    String id;                 // 永久身份，不随排列或改名变化
+    String name;
+    String description;
+    String image;              // 当前图片的项目相对路径
+    String video;
+    List<String> materials;    // 分镜关联的角色/场景 ID
+    List<Version> versions;
+}
+
+record Version(String id, String jobId, String kind,
+               String file, String prompt) {}
+
+class Job {
+    String id;                 // 这次生成的身份
+    String targetId;           // 生成结果属于哪个 Item
+    Generation generation;
+    String status;
+    String promptId;           // ComfyUI 任务身份，与上面的 ID 不同
+    List<String> outputs;
+}
+```
+
+`uid()` 使用 `uuid.uuid4().hex`，生成不带连字符的字符串。Java 类似 `UUID.randomUUID().toString().replace("-", "")`。
+
+分镜编号只是显示顺序。删除镜头后“分镜 3”可以变成“分镜 2”，但真实 ID 保持不变。自定义镜头名称保存于 `original_name`，不用它来建立引用。
+
+### 3.1 生成结果归属
+
+核心是 `Project.attach_output(job, relative)`。它按照 **job.target** 查找条目，不读取当前 UI 选中了哪张卡片：
+
+```java
+// 核心逻辑对照；实际 Python 还保存时间、素材快照和项目。
+void attachOutput(Job job, String relativeFile) {
+    Item item = findById(job.targetId);
+    if (item == null) return; // 被删除条目不重新创建；任务记录仍保留输出
+    boolean exists = item.versions.stream().anyMatch(v ->
+        v.jobId().equals(job.id) && v.file().equals(relativeFile));
+    if (exists) return;       // 恢复查询再次登记时，不重复创建版本
+
+    boolean video = job.generation.mode.startsWith("h3");
+    item.versions.add(new Version(newId(), job.id,
+        video ? "video" : "image", relativeFile, job.generation.prompt));
+    if (video) item.video = relativeFile;
+    else item.image = relativeFile;
+    markDependentShotsForReview(item.id);
+    saveProject();
+}
+```
+
+这解释了之前“生成图片跑到测试角色 1”为什么是严重问题：界面选择可以变化，结果归属不能变化。历史页也必须读取每次 `job.outputs`；读取 `item.image` 只能得到当前选中的版本，无法代表过去那次生成。
+
+### 3.2 保存、路径和删除
+
+`atomic_json` 先写同目录临时文件，刷新并同步文件，再用 `os.replace` 替换目标。Windows 短暂占用导致替换失败时有限重试。不要直接截断旧文件后写入，否则崩溃可能损坏唯一项目文件。
+
+Java 中相近的做法是临时文件、`FileChannel.force(true)` 和替换移动；不同文件系统对原子移动支持不同，正式移植必须处理其行为和重试，不能只复制几行示例就声称兼容。
+
+`Project.file(relative)` 会解析真实路径并检查仍在项目根目录内。Java 类似 `root.resolve(relative).toRealPath()` 后检查 `startsWith(root)`，但不存在的输出、符号链接和 Windows junction 需要单独处理。
+
+桌面打开项目时使用 `QLockFile`，阻止两个实例同时修改同一项目。删除条目会解除分镜引用并标记待检查；已有文件和任务历史保留供恢复。桌面服务还禁止删除有未完成任务的条目。
+
+## 4. Vue 到 Python：请求与状态是两条通路
+
+业务通信不是 `fetch('/api/...')`。前端 Gateway 调用桥接对象 `studio.request`：
+
+```json
+{
+  "id": "request-unique-id",
+  "command": "generation.submit",
+  "payload": {
+    "target": "existing-item-id",
+    "generation": { "mode": "krea", "prompt": "..." }
+  }
+}
+```
+
+上面只展示通信形状，省略了实际完整生成参数；不是可直接提交的测试请求。
+
+Bridge 解析、验证外层结构，交给 `StudioService.dispatch()`。成功返回 `{id, ok:true, result}`，异常返回 `{id, ok:false, error}`。前端等待 Map 用请求 ID 找到 Promise，决定 resolve 或 reject。
+
+Java 概念对照：
+
+```java
+record Request(String id, String command, Map<String, Object> payload) {}
+record Reply(String id, boolean ok, Object result, String error) {}
+
+Reply handle(Request request) {
+    try {
+        Object result = service.dispatch(request.command(), request.payload());
+        return new Reply(request.id(), true, result, null);
+    } catch (Exception e) {
+        return new Reply(request.id(), false, null, e.getMessage());
+    }
+}
+```
+
+生成请求返回的是任务 ID，**不是最终图片**。后续进度和结果通过 `stateChanged` 推送整个状态快照，Pinia 更新响应式页面。`notification` 单独传递错误或提醒。
+
+以下是现有主要命令，参数完整校验以 `service.py` 为准：
+
+| 命令 | 关键参数 | 作用 |
+|---|---|---|
+| `bootstrap` | 无 | 读取项目、设置、任务、审阅等当前状态 |
+| `project.new / open` | `path` 可选；新建可带 `title` | 无路径时打开桌面文件选择器 |
+| `project.save / story / folder` | 故事带 `text` | 保存项目、修改故事、打开项目目录 |
+| `selection` | `id`、`toggle`、`pin`、`clear` 可选 | 选择或取消、固定 AI 上下文、清空上下文 |
+| `asset.add` | `kind`、`name`、`description` | 添加角色、场景或自动编号分镜 |
+| `asset.update / delete / reviewed` | `id`；更新还带名称和描述 | 修改、删除、清除待检查标记 |
+| `asset.link` | `id`、`ids` | 分镜关联已有角色和场景 |
+| `asset.import` | `id`、`paths` 可选 | 导入图片并登记版本 |
+| `references.import` | `paths` 可选 | 导入生成用参考图，保留顺序 |
+| `version.use` | `id`、`version` | 切换当前图片或视频，旧历史不变 |
+| `generation.defaults / preview` | 目标和模式 / 完整生成参数 | 读默认值 / 计算尺寸和实际帧数，不排队 |
+| `generation.submit` | `target`、`generation` | 校验、保存任务并进入队列 |
+| `queue.toggle` | 无 | 暂停或继续后续任务 |
+| `task.cancel / resume` | `id` | 取消指定任务 / 查询已知后端任务 |
+| `chat.send` | `text` | 真实 DeepSeek 请求 |
+| `review.respond` | `id`、`accepted`、`generation` 可选 | 对指定建议确认或取消 |
+| `settings.save / models.refresh` | 设置对象 / 无 | 保存设置与密钥 / 获取账户模型列表 |
+| `agent.import` | `path` 可选 | 导入建议文件，仍经过审阅，不是实时 Codex 接入 |
+| `media.open / link.open` | 项目相对 `file` / `url` | 打开原文件 / 安全协议的外部链接 |
+| `error.clear / app.close` | 无 | 清理已读错误 / 正常退出 |
+
+`snapshot()` 是展示 DTO：例如种子转成字符串，视频加预览 URL，任务加 `results`，对话转成可读文本。新增 DTO 字段不等于修改 `schema=1`。
+
+## 5. 生成参数和工作流
+
+`Generation` 相近于一个有默认值的 Java 参数类：
+
+```java
+class Generation {
+    String mode = "qwen";
+    String prompt = "";
+    String ratio = "16:9";
+    double megapixels = 1.0;
+    double seconds = 5.0;
+    long seed = 42;
+    int steps = 0;             // 0 表示采用对应工作流的默认采样步数
+    boolean cinema = false;
+    double cinemaStrength = 0.4;
+    boolean quadLora = true;
+    List<String> styles = new ArrayList<>();
+    double scale = 2.0;
+    List<String> references = new ArrayList<>();
+    boolean qwenInt8 = false;
+}
+```
+
+这些是领域对象的缺省值。GUI 读 `generation.defaults` 时还会按图片/视频任务设置合适的初始值并回填上次提示词，因此不要把它们误解成每个窗口始终显示的值。
+
+当前模式包含 Qwen 文生图/编辑、Krea2 文生图/四视图、H3 图生/参考/文生/首尾帧视频，以及 RFMSR 放大。后端再次检查视频只能属于分镜，角色和场景不能生成视频。
+
+`references` 是有序列表，提示词的 `<image1>` 等引用必须对应真实顺序。Qwen 编辑最多 16 张，H3 参考 1–9 张，首尾帧恰好 2 张，放大使用 1 张。不能把尚未生成的未来路径当参考。
+
+### 5.1 比例、尺寸和时间
+
+`resolution()` 将比例和像素预算换成宽高，并对齐到模型所需倍数。H3/Qwen 的预览通常按 32 对齐，Krea 按 8 对齐。放大预览按输入尺寸乘倍数计算。
+
+`frames()` 使用 24 fps，把帧数对齐到 `5 + 17k`。Java 算法对照：
+
+```java
+int frames(double seconds) {
+    if (!Double.isFinite(seconds) || seconds < 0.2 || seconds > 149)
+        throw new IllegalArgumentException("时长超出范围");
+    // Python round 的半数取偶规则用 Math.rint 表达，避免机械使用 Math.round。
+    int n = Math.max(5, (int) Math.rint(seconds * 24));
+    return n + Math.floorMod(5 - n % 17, 17);
+}
+```
+
+例如输入 0.5 秒，12 帧向合法长度对齐为 22 帧，实际约 0.917 秒。参数窗口应显示实际结果；提示词时间线也要匹配实际时长。范围校验通过只代表参数合法，不能证明本机显存足够。
+
+种子允许 0 到 `2^63-1`。Java `long` 能精确表示；JavaScript `number` 无法精确表示所有这些整数，因此桥接层以十进制字符串传种子，Python 验证并转回整数。
+
+### 5.2 LoRA 的开关必须改变实际图
+
+`build()` 构造 ComfyUI API 图：节点 ID 对应 `class_type` 和 `inputs`。电影 LoRA、四视图 LoRA、风格 LoRA 关闭时，相应加载节点不出现在图里。仅隐藏前端勾选状态无法真正停用。
+
+`preflight()` 用本机 `object_info` 检查节点、必填输入和模型枚举，遇到缺模型或节点直接报错。没有自动下载安装模型的逻辑。独立的电影感工作流仍按原范围排除；H3 内电影 LoRA 开关保留。
+
+## 6. 队列、后台线程和数字进度
+
+提交任务时，服务深复制参数和关联素材快照，把任务保存为 `new`，保存该条目上次提示词，然后调用 `start_next()`。取消生成窗口不会覆盖上次提示词。
+
+同一 Studio 实例只执行一个生成/恢复任务。`start_next()` 在没有 active 任务且队列未暂停时，取第一项 `new` 任务。不能把外部 ComfyUI 的整条队列当成自己的队列。
+
+```mermaid
+stateDiagram-v2
+    [*] --> new
+    new --> submitting
+    submitting --> queued: 收到并保存 prompt_id
+    submitting --> unknown: 提交结果不确定
+    queued --> running
+    running --> downloading: 后端历史报告完成
+    downloading --> completed: 输出下载保存成功
+    new --> cancelled
+    queued --> cancelled: 删除指定排队任务
+    running --> cancel_requested
+    cancel_requested --> cancelled: 后端证实中断
+    running --> detached: 本机停止查询
+    running --> failed: 执行或查询异常
+```
+
+图展示常见路径，不是穷尽所有异常。真实运行中 HTTP 轮询和 WebSocket 事件可能交错，不能只依赖图中的单向顺序。
+
+Java 中可以理解为：用一个拥有数据修改权的线程维护 `Project`，用 `ExecutorService` 执行耗时网络操作，工作线程把事件送回拥有者。当前实现用 Qt 主线程和 Signal/Slot 完成这个分工。
+
+```java
+// ownerDispatcher 表示回到数据拥有者线程；Qt 对应跨线程 Signal/Slot。
+void startJob(Job source) {
+    Job snapshot = deepCopy(source);
+    workerExecutor.submit(() -> {
+        try {
+            ExecutionResult result = execute(snapshot, event ->
+                ownerDispatcher.execute(() -> onProgress(event)));
+            ownerDispatcher.execute(() -> onCompleted(result));
+        } catch (Exception e) {
+            ownerDispatcher.execute(() -> onFailed(e));
+        }
+    });
+}
+```
+
+后台线程会写该任务日志、下载文件；项目主对象的修改、结果登记和 Vue 状态发布回到 Qt 拥有者线程。不是所有文件 IO 都必须在主线程。
+
+### 6.1 进度从哪里来
+
+1. `Comfy.open_progress()` 建立带 client ID 的 WebSocket。
+2. `progress_events(prompt_id)` 只接收属于当前后端任务的事件，支持 `progress`、`executing` 和当前运行节点的 `progress_state`。
+3. `execute()` 写入 `progress={value,max}` 并通知服务。
+4. `snapshot()` 计算 `value / max * 100`。
+5. `TaskProgress.vue` 同时显示百分比、步数和阶段，卡片与全局任务共用实际状态。
+
+Java 对照为 `Double percent = max > 0 ? value * 100.0 / max : null`。准备、解码、保存等无测量值的阶段用 `null`，不能定时加百分比。
+
+当前步骤达到 100% 并不代表整个任务完成。下一步骤可能重新计数，最终完成必须以后端历史、实际下载文件和版本登记为依据。ComfyUI 事件不推送时，可以继续 HTTP 查询结果，但没有依据制造数字进度。本次重启恢复了事件推送，未确认底层阻塞的具体成因。
+
+### 6.2 取消与恢复
+
+排队取消调用 `/queue` 删除指定 prompt ID；运行取消调用本机支持的 `/interrupt` 并带指定 ID，不能无条件中断其他人的任务。
+
+网络提交后如果不知道是否成功，不自动重交。恢复使用任务日志中已保存的 `prompt_id` 查询，不生成第二项相同任务。没有后端 ID 的任务提示人工核对。打开旧项目也不会立即提交其中所有待办任务。
+
+应用退出会保存、释放锁、停止本机查询与自己的预览资源。独立运行的 ComfyUI 保留，任务可能仍在其队列中；下次通过恢复查询核对。因此“退出不遗留本应用进程”和“杀掉所有生成任务”不是同一种实现。
+
+## 7. AI：先建议，再审阅，最后执行
+
+AI 服务有两层循环，必须分清：
+
+| 层次 | 负责模块 | 实际行为 |
+|---|---|---|
+| 模型请求循环 | `deepseek.chat()` | 单次调用最多 8 轮主模型请求；按需读指南、最多 3 次检索、有限格式修正 |
+| 用户审阅与续办 | `StudioService` | 项目写操作逐项确认；成功创建/修改后可继续原请求，最多 4 轮；生成提交后不等待结果自动继续 |
+
+`read_skill`、`web_search` 是读取资料的工具；`add_item`、`update_item`、`set_story`、`generate` 是需要审阅的项目操作。只让 AI 产生建议，不允许它任意执行 Python 代码、访问任意文件或自行提交未审阅的改动。
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant V as Vue
+    participant S as StudioService
+    participant D as DeepSeek
+    U->>V: 修改选中角色的图片
+    V->>S: chat.send
+    S->>D: 历史与当前项目上下文
+    D-->>S: 生成工具建议与参数
+    S-->>V: pending 审阅状态
+    U->>V: 确认或取消
+    V->>S: review.respond
+    alt 确认
+        S->>S: 再次校验并加入生成队列
+        S-->>V: 已加入队列；后续真实进度
+    else 取消
+        S-->>V: 未执行；不产生生成任务
+    end
+```
+
+### 7.1 为什么先创建素材时不能用旧 ID
+
+同轮先 `add_item` 再 `generate` 时，AI 用 `@新条目名称` 引用尚未创建的条目。`action_targets.py` 在创建实际成功后解析为新 ID，创建取消或失败则阻止后续依赖操作。它不是把第一个角色或当前选中对象当默认目标。
+
+`review.respond` 必须携带当前 pending 的 ID。过期或重复确认报错，不能重复提交。版本归属还有上一节的 `job.target` 校验，二者解决的是不同阶段的问题。
+
+### 7.2 Skill 与补读指南
+
+内置指南在 `studio/skills/`。起始只给模型目录摘要，用到图片编辑或视频时才读取白名单文件，不能提供任意路径读取。
+
+如果模型已提出生成，却漏读必要指南，应用会补读并要求继续通过生成工具提出建议。该修正请求使用 `tool_choice='required'`，普通聊天不强制工具。没有这一步时，模型可能只返回提示词文字，界面拿不到可审阅的生成操作。
+
+H3 提示词需要相应分段顺序，格式校验失败时允许有限修正，仍失败则停止并说明原因。它验证结构，不证明动作或画面效果合格。
+
+### 7.3 本版本为何不自动完成“舞台 → 合成 → 视频”
+
+生成是异步任务，第一次请求时后两步的真实输入文件还不存在。当前 Agent 在提交生成后不会等结果再启动新的对话轮次，因而不具备完整的依赖计划执行器。
+
+要实现连续制作，需要计划状态、输出绑定、失败处理、恢复及各步骤审阅等额外设计。用户已决定本版不做；不能通过预先编造路径、轮询假完成或默默扩大执行权限实现。
+
+### 7.4 用户看到的文本与原始记录
+
+`presentation.py` 只转换用户界面的显示文本：明确的内部 Skill JSON 转成“已参考视频创作指南”；空白或英文工具说明显示中文操作摘要；普通创作文本和用户原文保留。`ChatSources.vue` 保留真实检索来源和获取失败提示。
+
+原始模型消息、工具参数和活动记录仍保存在项目，后续模型上下文使用原始内容。相当于 Java 中 `ChatMessage` 与 `ChatMessageView` 分离。**不能先改坏原始消息，再把修改后的展示摘要传回模型。**
+
+AI 当前拿到文字和文件路径，没有图像像素输入。它可以按照用户要求编写给图像模型的参考编辑指令，不能声称自己已经看过或核验了图片。
+
+## 8. 预览、设置和生命周期
+
+图片 URL 带当前项目的随机媒体 token，媒体服务只允许限定文件类型和项目内路径，支持视频 Range 请求。切换项目后媒体 token 更新；前端使用服务提供的 URL，不拼接硬盘绝对路径。
+
+H3 原视频保留。`PreviewCache` 为 WebEngine 不支持的编码准备兼容预览，`video_poster()` 提取封面，预览失败明确显示错误，不删除原媒体。
+
+设置继续使用 `QSettings('XiYi', 'AIStoryStudio')`；API Key 存于 Windows 凭据管理器的 `AIStoryStudio/deepseek`。更名 XY Studio 没有随意改变这两个兼容标识。前端状态只得到 `keySet`，不会获得密钥字符串。
+
+正式 Windows 包由 PyInstaller 制作，Vue 的 `dist`、内置指南和图标一起打包。必须保留整个 XY-Studio 文件夹。调试端口仅显式 QA 参数启用，正常启动不打开调试端口。
+
+## 9. 按功能定位修改位置
+
+| 想修改什么 | 先看哪些文件 | 必须检查的影响 |
+|---|---|---|
+| 卡片排列、选中和图片放大 | `AssetCard.vue`、`ShotCard.vue`、`App.vue`、Store | 不能改变素材 ID；双击与单击选择不冲突 |
+| 新增或调整生成参数 | `GenerationForm.vue`、`types.ts`、`workflows.py`、Service | 前后端一致校验、旧任务默认值、实际图是否变化 |
+| 队列或取消恢复 | `service.py`、`comfy.py` | 不重复提交、不误中断外部任务、日志持久化 |
+| 历史结果显示 | Service `snapshot()`、`App.vue`、`GenerationDetails.vue` | 从 job 输出找结果，不能用当前版本替代历史 |
+| AI 工具或权限 | `deepseek.py`、`action_targets.py`、Service review | schema 校验、逐项确认、取消后不执行 |
+| 用户可读文案 | `presentation.py`、`AssistantPanel.vue`、`ChatSources.vue` | 原始记录不变、创作内容和真实错误不被误删 |
+| 新媒体类型 | `media.py`、`media_server.py`、`video_preview.py` | 路径边界、封面、编码兼容、原文件保留 |
+| 项目格式 | `storage.py`、Service `load()` | schema 兼容和旧项目测试；优先不改格式 |
+
+## 10. 本机开发与验证
+
+在仓库目录运行，PowerShell 命令如下：
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+npm --prefix frontend ci
+npm --prefix frontend run build
+.venv\Scripts\python.exe main.py
+```
+
+只有 Vue 的浏览器开发页没有正式桌面桥接，会明确报通信错误，不回退成 Mock。需要联调时构建 Vue，再运行桌面源码。
+
+Python 回归：
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests --basetemp local-data\pytest-learning -q
+```
+
+`--basetemp` 必须使用专用测试目录：pytest 会清理该目录，不能指向用户项目或仓库根目录。
+
+桌面回归通过 Playwright 连接实际 WebEngine。源码 QA 启动示例：
+
+```powershell
+.venv\Scripts\python.exe main.py --debug-port 9225
+```
+
+在桌面新建专用空项目，测试还需要旧项目验收副本和已完成的真实生成报告。`desktop.spec.ts` 顶部及最后一项测试明确列出了这些前置条件，不能在用户项目上随意跑。正式版的实际命令、项目副本和结果见 [验收记录](VALIDATION-v1.0.0.json)。
+
+`progress-live.mjs` 会真正提交 ComfyUI 任务，`readable-agent.mjs` 会调用 DeepSeek；二者不属于默认 `npm test`。前者使用低规格生成并核对测量值，后者提出真实图片编辑建议后取消，验证不会排队。测试机器须有对应模型、节点和凭据。
+
+打包使用 `scripts/build.ps1`。脚本拒绝覆盖已有版本目录。正式冻结包在 `releases/v1.0.0/`，后续修复使用新版本、新目录、新标签，保留 v1.0.0。
+
+## 11. 建议阅读顺序
+
+先读 `storage.py` 的 `Project.add/get/attach_output`，理解条目和版本；再读 `service.py` 的 `dispatch/submit/start_next/_completed`，理解请求与队列；然后看 `comfy.py` 的 `execute`，理解真实生成和恢复。
+
+接着读 `deepseek.py` 的 `TOOLS/chat` 和 Service 的 `_next_review/review`，理解 AI 为什么只能建议而不能直接越过审阅。最后对照 `gateway.ts`、Pinia Store 和 `TaskProgress.vue`，把整个“点击 → 后端 → 状态 → 页面”流程连起来。
+
+学习时可在专用项目中创建两个角色，为第一个排队后切换选中第二个，观察结果仍归属第一个；再切换当前版本，观察历史页仍显示各次原图。这个例子同时解释了 ID、异步任务、版本和展示 DTO 的关系。

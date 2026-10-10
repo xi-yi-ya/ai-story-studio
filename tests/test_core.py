@@ -90,6 +90,21 @@ def test_deepseek_mocked_request_contract(monkeypatch):
     assert calls[0][0]=='https://api.deepseek.com/chat/completions'
     assert calls[0][1]['json']['tools'] and calls[0][1]['json']['thinking']=={'type':'disabled'}
 
+
+def test_guide_loading_retry_keeps_existing_generation_on_review_tool_path(monkeypatch):
+    import copy
+    requests=[]
+    class Response:
+        ok=True
+        def json(self):return {'choices':[{'message':{'role':'assistant','content':'请确认修改内容。','tool_calls':[{'id':'edit','function':{'name':'generate','arguments':json.dumps({'target':'existing','mode':'qwen_edit','prompt':'将机器人改为黄色，保留构图。','references':['assets/robot.png']})}}]}}]}
+    def post(*a,**kw):requests.append(copy.deepcopy(kw['json']));return Response()
+    monkeypatch.setattr('studio.deepseek.requests.post',post)
+    result=chat('test-only','test-model',[{'role':'user','content':'请改图'}],{})
+    assert result['tool_calls'][0]['function']['name']=='generate'
+    assert len(requests)==2 and 'tool_choice' not in requests[0]
+    assert requests[1]['tool_choice']=='required'
+    assert requests[1]['thinking']=={'type':'disabled'}
+
 def test_cancelled_job_not_registered_as_success(tmp_path):
     p=Project(tmp_path/'p',True)
     class Interrupted:

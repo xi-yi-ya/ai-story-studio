@@ -26,6 +26,7 @@ from .research import safe_link
 from .media import video_poster, video_duration
 from .skill_library import CATALOG
 from .video_preview import PreviewCache
+from .presentation import display_chat_text, public_status
 
 
 class Events(QObject):
@@ -256,7 +257,7 @@ class StudioService(QObject):
         if model not in models:
             models.append(model)
         config = {'comfy': self.settings.value('comfy', 'http://127.0.0.1:8188'), 'model': model, 'models': models, 'online': self.settings.value('online_search', True, type=bool), 'keySet': bool(keyring.get_password('AIStoryStudio', 'deepseek'))}
-        state = {'version': __version__, 'config': config, 'catalog': {'modes': MODES, 'ratios': RATIOS, 'styles': STYLES, 'skills': CATALOG}, 'recent': self.recent, 'selectedId': self.selected, 'contextIds': self.context_ids, 'activeJob': self.active['id'] if self.active else None, 'busy': bool('chat' in self.workers or self.batch or self.pending), 'modelsBusy': 'models' in self.workers, 'status': self.status, 'error': self.last_error, 'review': self.pending, 'project': None}
+        state = {'version': __version__, 'config': config, 'catalog': {'modes': MODES, 'ratios': RATIOS, 'styles': STYLES, 'skills': CATALOG}, 'recent': self.recent, 'selectedId': self.selected, 'contextIds': self.context_ids, 'activeJob': self.active['id'] if self.active else None, 'busy': bool('chat' in self.workers or self.batch or self.pending), 'modelsBusy': 'models' in self.workers, 'status': public_status(self.status), 'error': self.last_error, 'review': self.pending, 'project': None}
         if not self.project:
             return state
         p = self.project
@@ -298,16 +299,24 @@ class StudioService(QObject):
             role = m['role']
             if role not in ('user', 'assistant', 'tool'):
                 continue
-            text = m.get('_display', m.get('content')) or ''
+            text = display_chat_text(m)
             messages.append({'id': 'chat-'+str(i), 'role': role, 'text': text, 'time': '', 'activity': m.get('_activity', [])})
         tasks = []
+        versions_by_file = {v['file']: v for item in assets + shots for v in item['versions']}
         for j in p.data['jobs']:
             try:
                 target_name = p.get(j['target'])['name']
             except ValueError:
                 target_name = '已删除条目'
             progress = j.get('progress')
-            tasks.append({'id': j['id'], 'targetId': j['target'], 'targetName': target_name, 'kind': 'video' if j['generation']['mode'].startswith('h3') else 'image', 'status': j['status'], 'progress': progress['value']/progress['max']*100 if progress and progress.get('max') else None, 'node': j.get('node'), 'steps': progress, 'prompt': j['generation']['prompt'], 'time': j.get('created', ''), 'error': j.get('error'), 'generation': self.wire_generation(j['generation']), 'outputs': [self.media_url(r) for r in j.get('outputs', [])], 'raw': j})
+            results = []
+            for index, relative in enumerate(j.get('outputs', [])):
+                version = versions_by_file.get(relative)
+                if not version:
+                    kind = 'video' if Path(relative).suffix.lower() in ('.mp4', '.webm', '.mkv') else 'image'
+                    version = self._version({'id':f"result-{j['id']}-{index}", 'job':j['id'], 'file':relative, 'kind':kind, 'time':j.get('created',''), 'intent':j['generation']['prompt']})
+                results.append(version)
+            tasks.append({'id': j['id'], 'targetId': j['target'], 'targetName': target_name, 'kind': 'video' if j['generation']['mode'].startswith('h3') else 'image', 'status': j['status'], 'progress': progress['value']/progress['max']*100 if progress and progress.get('max') else None, 'node': j.get('node'), 'steps': progress, 'prompt': j['generation']['prompt'], 'time': j.get('created', ''), 'error': j.get('error'), 'generation': self.wire_generation(j['generation']), 'outputs': [self.media_url(r) for r in j.get('outputs', [])], 'results':results, 'raw': j})
         state['project'] = {'id': p.data['id'], 'name': p.data['title'], 'root': str(p.root), 'story': p.data['story'], 'updated': p.data.get('updated', ''), 'assets': assets, 'shots': shots, 'tasks': tasks, 'chat': messages, 'paused': p.data.get('queue_paused', False)}
         return state
 
@@ -448,7 +457,10 @@ class StudioService(QObject):
                 result = '故事已保存'
         else:
             b['all_applied'] = False
-        self.project.data['chat'].append({'role':'tool', 'tool_call_id':call['id'], 'content':result, '_display': '已创建：'+args['name'] if name=='add_item' and accepted else result})
+        display = '已创建：'+args['name'] if name=='add_item' and accepted else result
+        if name=='generate' and accepted:
+            display = '已将「'+pending['targetName']+'」加入生成队列，完成后可在生成历史查看。'
+        self.project.data['chat'].append({'role':'tool', 'tool_call_id':call['id'], 'content':result, '_display': display})
         b['index'] += 1
         self.pending = None
         self._next_review()

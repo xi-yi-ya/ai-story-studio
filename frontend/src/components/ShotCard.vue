@@ -51,7 +51,7 @@ const linked = computed(() =>
 const task = computed(() => store.taskStatus(props.shot.id));
 const status = computed(() =>
   task.value?.status === "running"
-    ? `生成中${task.value.progress===null ? '' : ' · 节点 '+Math.round(task.value.progress)+'%'}`
+    ? `生成中${task.value.progress===null ? '' : ' · '+Math.round(task.value.progress)+'%'}`
     : ['new','submitting','queued'].includes(task.value?.status || '')
       ? "等待生成"
       : task.value?.status === "cancelled"

@@ -1,5 +1,6 @@
 """Real domain integration behind the Vue bridge; no generation network needed."""
 import json
+import time
 from dataclasses import asdict
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -8,7 +9,7 @@ from urllib.error import HTTPError
 import pytest
 from PIL import Image
 from PySide6.QtCore import QSettings, QTimer, Qt
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog, QLineEdit
 
 from studio import service as module
 from studio.service import StudioService
@@ -75,6 +76,36 @@ def test_selection_toggle_is_atomic_without_clearing_pinned_context(service):
     assert s.selected is None and s.context_ids==[actor]
     call(s,'selection',id=shot);call(s,'selection',id=shot)
     assert s.selected==shot  # Timeline navigation remains idempotent.
+
+
+def test_task_result_thumbnails_keep_each_output_after_version_changes_and_deletion(service):
+    s=service;target=call(s,'asset.add',kind='scenes',name='舞台')
+    s.project.data['queue_paused']=True
+    for color in ('red','blue'):
+        job=call(s,'generation.submit',target=target,generation=asdict(Generation(prompt=color)))
+        j=s.project.data['jobs'][-1]
+        relative=f'outputs/{job}.png';Image.new('RGB',(32,32),color).save(s.project.file(relative))
+        j.update(status='completed',outputs=[relative]);s.project.attach_output(j,relative)
+    item=s.project.get(target)
+    call(s,'version.use',id=target,version=item['versions'][0]['id'])
+    tasks=s.snapshot()['project']['tasks']
+    assert [t['results'][0]['file'] for t in tasks]==[j['outputs'][0] for j in s.project.data['jobs']]
+    assert tasks[0]['results'][0]['media']!=tasks[1]['results'][0]['media']
+    call(s,'asset.delete',id=target)
+    assert all(t['results'][0]['media'] for t in s.snapshot()['project']['tasks'])
+
+
+def test_chat_display_does_not_rewrite_internal_messages_or_hide_sources(service):
+    s=service
+    record={'type':'skill','skill':'h3','file':'SKILL.md'}
+    message={'role':'assistant','content':'创作建议\n'+json.dumps(record),'_activity':[record,{'type':'search','sources':[{'title':'来源','url':'https://example.com/'}]}]}
+    s.project.data['chat'].append(message)
+    s.status='读取技能：h3/SKILL.md'
+    dto=s.snapshot()
+    assert 'SKILL.md' not in dto['project']['chat'][-1]['text']
+    assert dto['project']['chat'][-1]['activity'][1]['sources'][0]['url']=='https://example.com/'
+    assert dto['status']=='正在准备视频创作建议'
+    assert s.project.data['chat'][-1]==message
 
 
 def test_seed_exact_precision_and_cancelled_prompt_does_not_overwrite(service):
@@ -183,10 +214,33 @@ def test_file_picker_entrypoints_with_actual_qt_dialog(service, tmp_path):
     app.setAttribute(Qt.AA_DontUseNativeDialogs,True)
     def choose(path):
         found=[]
+        picker=None
+        deadline=time.monotonic()+3
         def select():
-            dialog=next((w for w in app.topLevelWidgets() if isinstance(w,QFileDialog) and w.isVisible()),None)
-            if dialog is None:QTimer.singleShot(10,select);return
-            found.append(dialog.windowTitle());dialog.selectFile(str(path));dialog.accept()
+            nonlocal picker
+            if picker is None:
+                picker=next((w for w in app.topLevelWidgets() if isinstance(w,QFileDialog) and w.isVisible()),None)
+                if picker is None:
+                    if time.monotonic()<deadline:QTimer.singleShot(10,select)
+                    return
+                found.append(picker.windowTitle());picker.setDirectory(str(path.parent))
+            try:
+                if not picker.isVisible():return
+                if time.monotonic()>=deadline:
+                    found.append({'selected':picker.selectedFiles(),'directory':picker.directory().absolutePath(),'filters':picker.nameFilters(),'mode':str(picker.fileMode())})
+                    picker.reject();return
+                picker.selectFile(str(path))
+                # ExistingFiles does not always populate the filename editor
+                # through selectFile once its asynchronous model is visible.
+                # Enter the actual filename as a user would, then accept the
+                # real dialog; do not mock its return value.
+                editor=picker.findChild(QLineEdit,'fileNameEdit')
+                if editor and path.is_file():editor.setText('"'+str(path)+'"')
+                picker.accept()
+                # QFileSystemModel may still be loading the directory. Retry
+                # this same dialog, never select an unrelated later picker.
+                if picker.isVisible():QTimer.singleShot(20,select)
+            except RuntimeError:return  # The accepted dialog was deleted.
         QTimer.singleShot(10,select)
         return found
     try:
@@ -195,5 +249,5 @@ def test_file_picker_entrypoints_with_actual_qt_dialog(service, tmp_path):
         seen=choose(root/'project.json');call(s,'project.open');assert seen and s.project.root==root
         target=call(s,'asset.add',kind='scenes',name='选择图片')
         png=tmp_path/'import.png';Image.new('RGB',(32,32)).save(png)
-        seen=choose(png);call(s,'asset.import',id=target);assert seen and s.project.get(target)['image']
+        seen=choose(png);call(s,'asset.import',id=target);assert seen and s.project.get(target)['image'], seen
     finally:app.setAttribute(Qt.AA_DontUseNativeDialogs,old)

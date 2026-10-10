@@ -40,6 +40,7 @@ import type {
   Page,
   Shot,
   Suggestion,
+  Task,
   Version,
 } from "./types";
 import AssetCard from "./components/AssetCard.vue";
@@ -52,6 +53,8 @@ import VideoPreview from "./components/VideoPreview.vue";
 import GenerationForm from "./components/GenerationForm.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import TaskProgress from "./components/TaskProgress.vue";
+import GenerationDetails from "./components/GenerationDetails.vue";
+import MessageText from "./components/MessageText.vue";
 
 const store = useStudio();
 const nav = [
@@ -102,6 +105,9 @@ const modal = ref<
   "edit" | "generate" | "link" | "history" | "preview" | "project" | "review" | "delete" | null
 >(null);
 const targetId = ref("");
+const historyJobId = ref<string | null>(null);
+const historyTask = computed(() => store.project.tasks.find(t => t.id === historyJobId.value));
+const historyVersions = computed(() => historyTask.value?.results || target.value?.versions || []);
 const target = computed(
   () =>
     store.project.assets.find((a) => a.id === targetId.value) ||
@@ -174,7 +180,13 @@ function openLink(id: string) {
 async function saveLinks(){await store.link(targetId.value,selectedLinks.value);modal.value=null;store.notify('素材关联已更新');}
 function openHistory(id: string) {
   targetId.value = id;
+  historyJobId.value = null;
   modal.value = "history";
+}
+function openTaskHistory(task: Task) {
+  targetId.value = task.targetId;
+  historyJobId.value = task.id;
+  modal.value = 'history';
 }
 function openPreview(v: Version) {
   preview.value = v;
@@ -209,7 +221,15 @@ async function persist(){await store.save();store.notify('项目已保存');}
 async function toggleStory(){if(storyEditing.value)await store.saveStory(store.project.story);storyEditing.value=!storyEditing.value;}
 function confirmDelete(id:string){targetId.value=id;modal.value='delete';}
 async function deleteTarget(){await store.remove(targetId.value);modal.value=null;}
-const reviewText=computed(()=>JSON.stringify(suggestion.value?.args,null,2));
+const reviewDetails=computed(()=>{
+  const s=suggestion.value;if(!s)return [];
+  if(s.name==='set_story')return [{label:'故事内容',text:String(s.args.text || '')}];
+  const item=store.project.assets.find(a=>a.id===s.args.id)||store.project.shots.find(a=>a.id===s.args.id);
+  const details=[{label:s.name==='add_item'?'名称':'修改对象',text:String(s.args.name || item?.name || '当前条目')},{label:'内容描述',text:String(s.args.description || '')}];
+  if(s.name==='add_item')details.unshift({label:'创建类型',text:({characters:'角色',scenes:'场景',shots:'分镜'} as Record<string,string>)[String(s.args.kind)] || '素材'});
+  if(Array.isArray(s.args.materials))details.push({label:'关联素材',text:s.args.materials.map(id=>store.project.assets.find(a=>a.id===id)?.name || '素材已移除').join('、') || '无'});
+  return details;
+});
 const pendingRecords=computed(()=>store.project.tasks.filter(t=>t.targetId===targetId.value && t.status!=='completed'));
 watch(()=>store.project.id,()=>{modal.value=null;search.value='';});
 void store.initialize();
@@ -497,7 +517,7 @@ onMounted(() => {
             </template>
             <template v-else-if="store.page === 'projects'">
   <div class="project-grid"><button v-for="p in store.projects" :key="p.id" class="project-card surface" @click="store.openProject(p.id)"><div class="project-cover"><FolderOpen :size="32" :stroke-width="1.3"/></div><div><span class="project-card-caption">最近打开的项目</span><h3>{{p.name}}</h3><p>{{p.story}}</p><footer>打开项目<ArrowUpRight :size="16"/></footer></div></button></div>
-  <section class="welcome-note"><span class="welcome-icon"><Sparkles :size="23"/></span><div><h3>从一个想法，到一个完整的故事。</h3><p>打开已有 project.json，或在新文件夹创建项目。旧项目的素材、ID 和历史会保留。</p><div class="flex gap-3 mt-4"><button class="btn btn-primary" @click="store.openProject()"><FolderOpen :size="15"/>打开项目</button><button v-if="store.hasProject" class="btn" @click="store.folder"><ExternalLink :size="15"/>打开项目文件夹</button></div></div></section>
+  <section class="welcome-note"><span class="welcome-icon"><Sparkles :size="23"/></span><div><h3>从一个想法，到一个完整的故事。</h3><p>打开已有 project.json，或在新文件夹创建项目。旧项目的素材、关联关系和历史会保留。</p><div class="flex gap-3 mt-4"><button class="btn btn-primary" @click="store.openProject()"><FolderOpen :size="15"/>打开项目</button><button v-if="store.hasProject" class="btn" @click="store.folder"><ExternalLink :size="15"/>打开项目文件夹</button></div></div></section>
 </template>
 <template v-else-if="store.page === 'tasks'">
               <div class="task-stats">
@@ -539,7 +559,7 @@ onMounted(() => {
                   <h3>这里还没有任务</h3>
                   <p>生成进度、取消结果和恢复记录会显示在这里。</p>
                 </div>
-                <div v-for="t in tasks" :key="t.id" class="task-row">
+                <div v-for="t in tasks" :key="t.id" class="task-row" :data-testid="`task-${t.id}`">
                   <span class="task-type"
                     ><Clapperboard
                       v-if="t.kind === 'video'"
@@ -548,12 +568,18 @@ onMounted(() => {
                   <div class="task-main">
                     <strong>{{ t.targetName }}</strong>
                     <p>
-                      {{ t.kind === "video" ? "H3 · 视频" : "Qwen Image · 图片"
+                      {{ t.kind === "video" ? "视频生成" : "图片生成"
                       }}<span> {{ t.time }}</span>
                     </p>
                     <span v-if="t.error" class="danger text-xs">{{
                       t.error
                     }}</span>
+                    <div v-if="t.results.length" class="task-output-grid">
+                      <button v-for="(result,i) in t.results" :key="result.id" class="task-output" :aria-label="`查看${t.targetName}生成结果${i+1}`" @click="openPreview(result)">
+                        <MediaThumb :media="result.media" :label="`${t.targetName}本次生成结果`" />
+                        <span>{{result.kind==='video'?'视频':'图片'}} {{i+1}}</span>
+                      </button>
+                    </div>
                   </div>
                   <div class="task-row-status">
                     <span
@@ -577,14 +603,13 @@ onMounted(() => {
                     v-else-if="t.status === 'completed'"
                     class="btn"
                     @click="
-                      targetId = t.targetId;
-                      openHistory(t.targetId);
+                      openTaskHistory(t);
                     "
                   >
                     查看结果</button
                   ><button v-else-if="['unknown','detached','queued','running'].includes(t.status)" class="btn" @click="store.resumeTask(t.id)">
                     <RotateCcw :size="13" />恢复查询
-                  </button><button v-if="(t.raw as {prompt_id?:string}).prompt_id && store.state?.activeJob!==t.id && ['queued','running','failed','cancel_requested'].includes(t.status)" class="btn" @click="store.resumeTask(t.id)">恢复查询</button><button v-if="!['new','submitting','running','queued','downloading','cancel_requested'].includes(t.status)" class="btn" @click="openGenerate(t.targetId,t.kind,undefined,t.generation)">再次生成</button><details class="task-details"><summary>任务详情</summary><pre>{{JSON.stringify(t.raw,null,2)}}</pre><button v-for="file in (t.raw as {outputs?:string[]}).outputs" :key="file" class="text-action" @click="store.openFile(file)">打开原文件</button></details>
+                  </button><button v-if="(t.raw as {prompt_id?:string}).prompt_id && store.state?.activeJob!==t.id && ['queued','running','failed','cancel_requested'].includes(t.status)" class="btn" @click="store.resumeTask(t.id)">恢复查询</button><button v-if="!['new','submitting','running','queued','downloading','cancel_requested'].includes(t.status)" class="btn" @click="openGenerate(t.targetId,t.kind,undefined,t.generation)">再次生成</button><details class="task-details"><summary>生成详情</summary><p class="task-description">{{t.prompt}}</p><GenerationDetails :generation="t.generation" :materials="(t.raw as {materials?:unknown[]}).materials"/><button v-for="(result,i) in t.results" :key="result.id" class="text-action" @click="store.openFile(result.file)">打开{{result.kind==='video'?'视频':'图片'}}原文件 {{i+1}}</button></details>
                 </div>
               </div>
             </template>
@@ -675,7 +700,7 @@ onMounted(() => {
         </footer>
       </form></StudioDialog
     >
-<StudioDialog :open="modal==='generate'" @update:open="v=>!v&&cancelGeneration()" :title="gen.mode.startsWith('h3')?'生成视频 · 参数审阅':'生成图片 · 参数审阅'" :description="`结果保存至「${target?.name}」，保留已有版本。确认后才提交 ComfyUI。`"><form class="form-content" @submit.prevent="confirmGeneration"><div class="target-pill"><Link2 :size="14"/>{{target?.name}}<span>{{targetId.slice(0,8)}} · 新版本</span></div><GenerationForm v-model="gen" :target-id="targetId"/><footer class="dialog-actions"><button type="button" class="btn" @click="cancelGeneration">取消生成</button><button class="btn btn-primary">加入生成队列</button></footer></form></StudioDialog>
+<StudioDialog :open="modal==='generate'" @update:open="v=>!v&&cancelGeneration()" :title="gen.mode.startsWith('h3')?'生成视频 · 参数审阅':'生成图片 · 参数审阅'" :description="`结果保存至「${target?.name}」，保留已有版本。确认后才开始生成。`"><form class="form-content" @submit.prevent="confirmGeneration"><div class="target-pill"><Link2 :size="14"/>{{target?.name}}<span>保存为新版本</span></div><GenerationForm v-model="gen" :target-id="targetId"/><footer class="dialog-actions"><button type="button" class="btn" @click="cancelGeneration">取消生成</button><button class="btn btn-primary">加入生成队列</button></footer></form></StudioDialog>
     <StudioDialog
       :open="modal === 'link'"
       @update:open="(v) => !v && (modal = null)"
@@ -707,16 +732,16 @@ onMounted(() => {
     <StudioDialog
       :open="modal === 'history'"
       @update:open="(v) => !v && (modal = null)"
-      :title="`${target?.name || '素材'} · 生成历史`"
+      :title="`${historyTask?.targetName || target?.name || '素材'} · 生成历史`"
       wide
-      ><div v-if="!target?.versions.length" class="empty-state">
+      ><div v-if="!historyVersions.length" class="empty-state">
         <History :size="32" />
         <h3>每次尝试，都会留在这里</h3>
         <p>生成新版本后，可随时比较和重新选定。</p>
       </div>
       <div class="version-grid">
-        <article v-for="v in target?.versions" :key="v.id" class="version-card">
-          <button @dblclick="openPreview(v)">
+        <article v-for="v in historyVersions" :key="v.id" class="version-card">
+          <button :aria-label="`查看${v.kind==='video'?'视频':'图片'}历史大图`" @click="openPreview(v)">
             <MediaThumb :media="v.media" :label="v.label" />
           </button>
           <div class="flex items-center justify-between mt-3">
@@ -726,8 +751,9 @@ onMounted(() => {
             }}</span>
           </div>
           <p>{{ v.time }}</p>
-          <p class="version-prompt">{{ v.prompt }}</p><details class="version-details"><summary>完整参数与素材快照</summary><pre>{{JSON.stringify({generation:v.generation,materials:v.materials},null,2)}}</pre></details>
+          <p class="version-prompt">{{ v.prompt }}</p><details class="version-details"><summary>生成参数与使用素材</summary><GenerationDetails :generation="v.generation" :materials="v.materials"/></details>
           <button
+            v-if="target?.versions.some(version=>version.id===v.id)"
             class="btn"
             :class="{
               active:
@@ -744,7 +770,7 @@ onMounted(() => {
         </article>
       </div><details v-if="pendingRecords.length" class="version-details"><summary>未完成记录 · {{pendingRecords.length}}</summary><div v-for="t in pendingRecords" :key="t.id"><p>{{statusNames[t.status]}} · {{t.time}} · {{t.error}}</p><pre>{{t.prompt}}</pre></div></details></StudioDialog
     >
-<StudioDialog :open="modal==='review'" @update:open="v=>!v&&(modal=null)" :title="suggestion?.title || '审阅 AI 操作'" description="确认后才修改项目；取消会反馈给 Agent 并停止相关续办。"><pre class="review-description">{{reviewText}}</pre><footer class="dialog-actions"><button class="btn" @click="suggestion && store.reviewSuggestion(suggestion,false);modal=null">取消本次操作</button><button class="btn btn-primary" @click="suggestion && store.reviewSuggestion(suggestion,true);modal=null">确认{{suggestion?.title}}</button></footer></StudioDialog>
+<StudioDialog :open="modal==='review'" @update:open="v=>!v&&(modal=null)" :title="suggestion?.title || '审阅 AI 操作'" description="请检查以下内容，确认后才修改项目。取消不会执行这次操作。"><dl class="review-fields"><div v-for="field in reviewDetails" :key="field.label"><dt>{{field.label}}</dt><dd><MessageText :text="field.text"/></dd></div></dl><footer class="dialog-actions"><button class="btn" @click="suggestion && store.reviewSuggestion(suggestion,false);modal=null">取消本次操作</button><button class="btn btn-primary" @click="suggestion && store.reviewSuggestion(suggestion,true);modal=null">确认{{suggestion?.title}}</button></footer></StudioDialog>
 <StudioDialog :open="modal==='delete'" @update:open="v=>!v&&(modal=null)" title="删除条目" description="文件和历史输出仍保留，相关镜头解除素材关联。"><p>确认删除「{{target?.name}}」？</p><footer class="dialog-actions"><button class="btn" @click="modal=null">保留条目</button><button class="btn btn-primary" @click="deleteTarget">确认删除</button></footer></StudioDialog>
     <StudioDialog
       :open="modal === 'preview'"

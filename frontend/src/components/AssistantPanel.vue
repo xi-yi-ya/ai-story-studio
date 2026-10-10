@@ -13,6 +13,7 @@ import {
   ChevronDown,
 } from "lucide-vue-next";
 import MessageText from "./MessageText.vue";
+import ChatSources from "./ChatSources.vue";
 import { useStudio } from "../stores/studio";
 import type { Suggestion } from "../types";
 const store = useStudio();
@@ -134,7 +135,7 @@ function jumpTo() {
             }}
           </button>
         </div>
-<details v-if="message.activity?.length" class="activity-details"><summary>技能 / 联网执行记录 · {{message.activity.length}}</summary><div v-for="(entry,i) in message.activity" :key="i"><span>{{entry.type==='skill'?'读取技能':entry.type==='search'?'联网检索':'执行错误'}}</span><pre>{{JSON.stringify(entry,null,2)}}</pre></div></details>
+        <ChatSources :activity="message.activity || []" />
       </article>
 <div v-if="store.state?.review" class="suggestion-card"><div class="suggestion-title"><SlidersHorizontal :size="14"/><strong>{{store.state.review.title}}</strong><span>待审阅</span></div><p>{{store.state.review.targetName || store.state.review.args.name || store.state.review.args.description || store.state.review.args.text}}</p><div class="suggestion-actions"><button class="btn btn-primary" @click="emit('review',store.state.review!)">审阅操作</button><button class="btn" @click="store.reviewSuggestion(store.state.review!,false)">拒绝</button></div></div>
       <div v-if="store.busy" class="thinking">
@@ -180,6 +181,6 @@ function jumpTo() {
         </button>
       </footer>
     </form>
-    <p class="assistant-footnote">{{store.state?.status || '内置技能按需读取 · 操作先审阅'}}</p>
+    <p class="assistant-footnote">{{store.state?.status || '描述你的创作想法 · 操作前由你确认'}}</p>
   </aside>
 </template>

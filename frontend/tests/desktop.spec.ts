@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 let browser:Browser,page:Page,root:string,original:string;
 let actor:string,scene:string,shot:string;
 const legacyRoot=path.resolve(process.env.XY_LEGACY || '../local-data/XY-Studio-v030-compat');
+const validationVersion=process.env.XY_VALIDATION_VERSION || 'v033';
 test.describe.configure({mode:'serial'});
 async function rpc(command:string,payload:Record<string,unknown>={}){
  return page.evaluate(async([command,payload])=>await (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('studio').api(command,payload),[command,payload] as const);
@@ -19,6 +20,9 @@ test.beforeAll(async()=>{
  await rpc('project.new',{path:root,title:'Vue 真实桌面验收'});
 });
 test.afterAll(async()=>{if(original)await rpc('project.open',{path:original});await browser?.close()});
+test.afterEach(async()=>{
+ expect(await page.evaluate(()=>(document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('studio').connectionError)).toBe('');
+});
 test('new empty project, role and scene edit/import are persisted',async()=>{
  await page.getByRole('button',{name:'角色资产',exact:true}).click();
  await page.getByRole('button',{name:'创建角色',exact:true}).click();
@@ -127,6 +131,23 @@ test('old real H3 video plays, seeks and retains history in its original shot',a
  await page.getByTestId('shot-'+(await state()).project.shots[0].id).getByRole('button',{name:/历史版本/}).nth(1).click();
  expect((await state()).project.shots.length).toBe(before);await expect(page.locator('.inline-history')).toBeVisible();
 });
+test('late events from a detached video do not break the next project',async()=>{
+ await rpc('project.open',{path:legacyRoot});
+ await page.getByRole('button',{name:'分镜工作区',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('video')!.readyState>=2);
+ const oldDuration=await page.locator('video').first().evaluate(v=>v.duration);
+ expect(oldDuration).toBeGreaterThan(0);
+ const detached=await page.evaluate(async nextRoot=>{
+  const old=document.querySelector('video')!;
+  await (document.querySelector('#app') as any).__vue_app__.config.globalProperties.$pinia._s.get('studio').api('project.open',{path:nextRoot});
+  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  old.dispatchEvent(new Event('loadedmetadata'));
+  old.dispatchEvent(new Event('timeupdate'));
+  return !old.isConnected;
+ },root);
+ expect(detached).toBeTruthy();
+});
+
 test('Agent import review and retry use real reactive parameter data without cloning errors',async()=>{
  await rpc('project.open',{path:root});
  const s=await state();
@@ -163,4 +184,48 @@ test('many real shot cards and empty search do not break the workbench',async()=
  await page.getByRole('button',{name:'清除搜索',exact:true}).click();await expect(page.locator('.shot-card')).toHaveCount(41);
  await page.getByRole('button',{name:'折叠全部',exact:true}).click();await expect(page.locator('.shot-body')).toHaveCount(0);
  await page.getByRole('button',{name:/定位镜头41/}).click();await expect(page.locator('.shot-body')).toHaveCount(1);
+});
+test('AI review and legacy activity records use readable Chinese without internal JSON',async()=>{
+ await rpc('project.open',{path:root});
+ const s=await state();const bundle=path.join(root,'readable-review.json');
+ const content='将为你创建一个小型舞台。\n'+JSON.stringify({type:'skill',skill:'h3',file:'SKILL.md'});
+ await fs.writeFile(bundle,JSON.stringify({project_id:s.project.id,provider:'UI regression fixture',message:{role:'assistant',content,_activity:[{type:'skill',skill:'h3',file:'SKILL.md'},{type:'search',sources:[{title:'参考来源测试',url:'https://example.com/'}]}],tool_calls:[{id:'readable-create',type:'function',function:{name:'add_item',arguments:JSON.stringify({kind:'scenes',name:'非技术用户验收舞台',description:'安静的小舞台，暖色灯光。'})}}]}}));
+ await rpc('agent.import',{path:bundle});
+ await expect(page.locator('.assistant-panel')).not.toContainText('SKILL.md');
+ await expect(page.locator('.assistant-panel')).not.toContainText('"type"');
+ await expect(page.locator('.chat-sources')).toContainText('参考来源测试');
+ await page.getByRole('button',{name:'审阅操作',exact:true}).click();
+ await expect(page.locator('.review-fields')).toContainText('创建类型');
+ await expect(page.locator('.review-fields')).toContainText('场景');
+ await expect(page.getByRole('dialog')).not.toContainText('"kind"');
+ await page.getByRole('button',{name:'确认创建条目',exact:true}).click();
+ await expect(page.locator('.assistant-panel')).toContainText('已创建：非技术用户验收舞台');
+ const stored=JSON.parse(await fs.readFile(path.join(root,'project.json'),'utf8'));
+ expect(stored.chat.find((m:any)=>m.content?.includes('将为你创建一个小型舞台'))?.content).toContain('SKILL.md');
+});
+test('real generated task history shows its own images and video poster',async()=>{
+ const report=JSON.parse(await fs.readFile(`../local-data/${validationVersion}-progress-report.json`,'utf8'));
+ expect(report.passed).toBeTruthy();await rpc('project.open',{path:report.project});
+ await page.getByRole('button',{name:'任务与历史',exact:true}).click();
+ const s=await state();expect(s.project.tasks).toHaveLength(5);
+ for(const task of s.project.tasks){
+  const row=page.getByTestId('task-'+task.id);
+  await expect(row.locator('.task-output')).toHaveCount(task.results.length);
+  for(const [index,result] of task.results.entries()){
+   const img=row.locator('.task-output img').nth(index);await expect(img).toHaveAttribute('src',result.media);
+   await expect.poll(()=>img.evaluate((image:HTMLImageElement)=>image.naturalWidth)).toBeGreaterThan(0);
+  }
+ }
+ const sceneTasks=s.project.tasks.filter((t:any)=>t.targetName==='进度验收舞台');
+ expect(sceneTasks).toHaveLength(2);expect(sceneTasks[0].results[0].media).not.toBe(sceneTasks[1].results[0].media);
+ const row=page.getByTestId('task-'+sceneTasks[0].id);
+ await row.locator('.task-output').click();await expect(page.getByRole('dialog')).toBeVisible();await page.keyboard.press('Escape');
+ await row.getByRole('button',{name:'查看结果',exact:true}).click();
+ await expect(page.locator('.version-card')).toHaveCount(sceneTasks[0].results.length);
+ await expect(page.locator('.version-card img')).toHaveAttribute('src',sceneTasks[0].results[0].media);
+ await page.keyboard.press('Escape');
+ await row.locator('.task-details summary').click();await expect(row.locator('.generation-details')).toContainText('随机种子');
+ await expect(row.locator('.task-details')).not.toContainText('prompt_id');
+ await page.locator('.workspace-scroll').evaluate(e=>e.scrollTop=0);
+ await page.screenshot({path:`../docs/screenshots/${validationVersion}-history.png`});
 });

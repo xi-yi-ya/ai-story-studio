@@ -6,14 +6,15 @@ import fs from 'node:fs/promises';
 const browser = await chromium.connectOverCDP(process.env.XY_CDP || 'http://127.0.0.1:9225', { noDefaults: true });
 const page = browser.contexts()[0].pages()[0];
 const rpc = (command, payload = {}) => page.evaluate(async ([command, payload]) => document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('studio').api(command, payload), [command, payload]);
-const root = path.resolve('../local-data/v032-progress-' + Date.now());
+const validationVersion = process.env.XY_VALIDATION_VERSION || 'v032';
+const root = path.resolve(`../local-data/${validationVersion}-progress-` + Date.now());
 const report = { project: root, tests: [], errors: [] };
-const reportPath = '../local-data/v032-progress-report.json';
+const reportPath = `../local-data/${validationVersion}-progress-report.json`;
 const save = () => fs.writeFile(reportPath, JSON.stringify(report, null, 2));
 try {
   const queue = await (await fetch('http://127.0.0.1:8188/queue')).json();
   if (queue.queue_running.length || queue.queue_pending.length) throw Error('ComfyUI is busy; preserve existing user tasks');
-  await rpc('project.new', { path: root, title: 'v0.3.2 真实进度验收' });
+  await rpc('project.new', { path: root, title: `v${validationVersion.replace(/^v/, '').replace(/^(\d)(\d)(\d)$/, '$1.$2.$3')} 真实进度验收` });
   const actor = await rpc('asset.add', { kind: 'characters', name: '进度验收角色', description: '桌面绿色机器人' });
   const scene = await rpc('asset.add', { kind: 'scenes', name: '进度验收舞台', description: '空舞台与蓝色灯光' });
   const shot = await rpc('asset.add', { kind: 'shots', description: '舞台上的小机器人' });
@@ -36,9 +37,10 @@ try {
         const task = store.project.tasks.find(t => t.id === id);
         const bars = [...document.querySelectorAll(`[data-task-id="${id}"] [role="progressbar"]`)].map(b => ({ value: b.getAttribute('aria-valuenow'), text: b.getAttribute('aria-valuetext'), width: b.querySelector('span')?.style.width ?? null }));
         const card = document.querySelector(`[data-testid="asset-${task.targetId}"]`) || document.querySelector(`[data-testid="shot-${task.targetId}"]`);
-        return { task, bars, active: store.state.activeJob, cardTask: card?.querySelector('.generation-progress')?.getAttribute('data-task-id'), pending: store.pendingTasks };
+        return { task, bars, error: store.connectionError, active: store.state.activeJob, cardTask: card?.querySelector('.generation-progress')?.getAttribute('data-task-id'), pending: store.pendingTasks };
       }, id);
       const task = observed.task;
+      if(observed.error)throw Error(observed.error);
       const key = `${task.status}:${task.node}:${task.progress}`;
       if (record.observed.at(-1)?.key !== key) record.observed.push({ key, steps: task.steps, bars: observed.bars });
       if (task.status === 'running' && task.progress !== null && observed.active === id) {
@@ -47,7 +49,7 @@ try {
         if (queuedId && observed.cardTask !== id) throw Error('Queued regeneration hid the running task');
         record.barsVerified++;
         if (!record.screenshot && task.progress > 0 && task.progress < 100) {
-          const screenshot = `../docs/screenshots/v032-progress-${target === shot ? 'shot' : target === scene ? 'scene' : 'role'}.png`;
+          const screenshot = `../docs/screenshots/${validationVersion}-progress-${target === shot ? (generation.mode.startsWith('h3') ? 'video' : 'shot') : target === scene ? 'scene' : 'role'}.png`;
           await page.screenshot({ path: screenshot }); record.screenshot = screenshot;
         }
       } else if (['new', 'queued', 'submitting', 'downloading'].includes(task.status)) {
@@ -79,7 +81,7 @@ try {
   const image = await generate('分镜图片进度', shot, '分镜工作区');
   await generate('H3 视频进度', shot, '分镜工作区', { mode: 'h3_i2v', steps: 8, references: [image.imageFile], prompt: 'integrated_multimodal_description: For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced. [Shot 1] Static camera. The green toy robot slowly lifts its right arm, retaining the desk and blue background.\noverall_soundscape: Quiet indoor room tone.\nnon_diegetic_music: N/A.' });
   await page.getByRole('button', { name: '任务与历史', exact: true }).click();
-  await page.screenshot({ path: '../docs/screenshots/v032-completed-tasks.png' });
+  await page.screenshot({ path: `../docs/screenshots/${validationVersion}-completed-tasks.png` });
   report.passed = true;
 } catch (error) {
   report.errors.push(String(error)); process.exitCode = 1; console.error(String(error));
