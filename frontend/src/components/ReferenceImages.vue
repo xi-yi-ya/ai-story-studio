@@ -2,13 +2,14 @@
 import { ref, watch } from 'vue';
 import { ArrowUp, ArrowDown, X } from 'lucide-vue-next';
 import { useStudio } from '../stores/studio';
-import { dragMedia } from '../mediaDrag';
 import MediaThumb from './MediaThumb.vue';
 import StudioDialog from './StudioDialog.vue';
 const props = defineProps<{ files: string[]; editable?: boolean }>();
 const emit = defineEmits<{ move: [index: number, delta: number]; remove: [index: number] }>();
 const store = useStudio();
-const rows = ref<{ file: string; name: string; media: string; exists: boolean }[]>([]),
+const rows = ref<
+    { file: string; name: string; media: string; exists: boolean; trashed?: boolean }[]
+  >([]),
   large = ref<{ name: string; media: string } | null>(null);
 let serial = 0;
 watch(
@@ -39,15 +40,19 @@ watch(
         class="reference-thumb"
         :aria-label="`放大参考图${i + 1}`"
         :disabled="!row.exists"
-        :draggable="row.exists"
-        @dragstart="dragMedia($event, row.file, store.project.id)"
         @click="large = row"
       >
         <MediaThumb :media="row.media" :label="row.name" />
       </button>
       <div class="reference-image-name">
         <strong>{{ i + 1 }}. {{ row.name }}</strong
-        ><small>{{ row.exists ? `参考图 ${i + 1}` : '原文件缺失，请重新选择' }}</small>
+        ><small>{{
+          row.exists
+            ? `参考图 ${i + 1}`
+            : row.trashed
+              ? '参考图已在回收站，请先恢复'
+              : '原文件缺失，请重新选择'
+        }}</small>
       </div>
       <template v-if="editable"
         ><button

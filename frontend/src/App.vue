@@ -49,7 +49,6 @@ import GenerationDetails from './components/GenerationDetails.vue';
 import MessageText from './components/MessageText.vue';
 import MediaLibrary from './components/MediaLibrary.vue';
 import ReferenceImages from './components/ReferenceImages.vue';
-import { dragMedia } from './mediaDrag';
 
 const store = useStudio();
 const nav = [
@@ -180,29 +179,8 @@ async function saveAdopt() {
 async function libraryGenerate(kind: 'image' | 'video', previous?: GenerationInput) {
   await openGenerate('', kind, undefined, previous);
 }
-async function nativeDrop(event: Event) {
-  const data = (event as CustomEvent<{ paths: string[]; x: number; y: number }>).detail;
-  if (!store.hasProject) {
-    store.notify('请先新建或打开项目，再导入素材');
-    return;
-  }
-  const projectId = store.project.id;
-  const zone = document.elementFromPoint(data.x, data.y)?.closest<HTMLElement>('[data-media-drop]')
-    ?.dataset.mediaDrop;
-  try {
-    const files = await store.importMedia(
-      data.paths,
-      zone === 'references' || zone === 'images' ? 'image' : zone === 'videos' ? 'video' : 'auto',
-    );
-    if (projectId !== store.project.id) return;
-    if (zone === 'assistant') for (const file of files) await store.pinMedia(file);
-    else if (zone === 'references')
-      window.dispatchEvent(new CustomEvent('xy-references-added', { detail: { files } }));
-    window.dispatchEvent(new Event('xy-library-imported'));
-    store.notify(`已导入 ${files.length} 份素材${zone === 'assistant' ? '并添加到 AI 引用' : ''}`);
-  } catch {
-    /* api displays the actual error; no partial success is claimed. */
-  }
+function preventDrag(event: Event) {
+  event.preventDefault();
 }
 
 const historyJobId = ref<string | null>(null);
@@ -443,7 +421,15 @@ const reviewDetails = computed(() => {
     });
   return details;
 });
-const pendingRecords = computed(() => store.project.tasks.filter(t=>t.status!=='completed' && (historyTask.value?t.id===historyTask.value.id:!!target.value && t.targetId===targetId.value)));
+const pendingRecords = computed(() =>
+  store.project.tasks.filter(
+    (t) =>
+      t.status !== 'completed' &&
+      (historyTask.value
+        ? t.id === historyTask.value.id
+        : !!target.value && t.targetId === targetId.value),
+  ),
+);
 watch(
   () => store.project.id,
   () => {
@@ -454,12 +440,16 @@ watch(
 void store.initialize();
 onMounted(() => {
   if (window.innerWidth < 1100) store.assistantOpen = false;
-  window.addEventListener('xy-files-dropped', nativeDrop);
+  for (const event of ['dragstart', 'dragover', 'drop'])
+    document.addEventListener(event, preventDrag, true);
 });
-onBeforeUnmount(() => window.removeEventListener('xy-files-dropped', nativeDrop));
+onBeforeUnmount(() => {
+  for (const event of ['dragstart', 'dragover', 'drop'])
+    document.removeEventListener(event, preventDrag, true);
+});
 </script>
 <template>
-  <div class="studio-shell" :class="{ compact }" data-media-drop="library">
+  <div class="studio-shell" :class="{ compact }">
     <header class="topbar">
       <button class="brand" @click="navigate('projects')" aria-label="XY Studio 项目">
         <img src="/media/xy-logo.jpg" alt="XY" /><strong>XY Studio</strong></button
@@ -814,8 +804,6 @@ onBeforeUnmount(() => window.removeEventListener('xy-files-dropped', nativeDrop)
                         v-for="(result, i) in t.results"
                         :key="result.id"
                         class="task-output"
-                        :draggable="true"
-                        @dragstart="dragMedia($event, result.file, store.project.id)"
                         :aria-label="`查看${t.targetName}生成结果${i + 1}`"
                         @click="openPreview(result)"
                       >
@@ -1127,8 +1115,6 @@ onBeforeUnmount(() => window.removeEventListener('xy-files-dropped', nativeDrop)
       <div class="version-grid">
         <article v-for="v in historyVersions" :key="v.id" class="version-card">
           <button
-            :draggable="true"
-            @dragstart="dragMedia($event, v.file, store.project.id)"
             :aria-label="`查看${v.kind === 'video' ? '视频' : '图片'}历史大图`"
             @click="openPreview(v)"
           >

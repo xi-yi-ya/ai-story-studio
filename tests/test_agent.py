@@ -56,3 +56,32 @@ def test_disabled_search_cannot_execute_even_if_model_requests_it(monkeypatch):
     result=chat('test','deepseek-flash',[],{},online=False)
     assert result['_activity'][0]['type']=='error'
     assert '联网已关闭' in payloads[1]['messages'][-1]['content']
+
+
+def test_three_view_request_repairs_wrong_asset_creation_before_review(monkeypatch):
+    wrong={'role':'assistant','content':'','tool_calls':[call('add_item',{'kind':'characters','name':'洛天依','description':'角色三视图'},'bad-role'),call('add_item',{'kind':'scenes','name':'背景','description':'白色'},'bad-scene')]}
+    correct={'role':'assistant','content':'请确认三视图生成参数','tool_calls':[call('generate',{'mode':'qwen','prompt':'Luo Tianyi three views on white background','references':[]},'image')]}
+    payloads=mock_chat(monkeypatch,[wrong,correct,correct])
+    history=[{'role':'user','content':'帮我生成一个洛天依三视图'}]
+    result=chat('test','deepseek-flash',history,{},asset_query=lambda **kw:{'items':[]})
+    assert result['tool_calls'][0]['function']['name']=='generate'
+    assert len(payloads)==3 # Incorrect action repaired, then required guide loaded.
+    replies=[m for m in payloads[1]['messages'] if m.get('role')=='tool']
+    assert [m['tool_call_id'] for m in replies]==['bad-role','bad-scene']
+    assert all('尚未执行' in m['content'] for m in replies)
+    assert history==[{'role':'user','content':'帮我生成一个洛天依三视图'}]
+
+
+def test_invalid_asset_path_has_bounded_repair_and_never_returns_mutation(monkeypatch):
+    wrong={'role':'assistant','tool_calls':[call('add_item',{'kind':'characters','name':'洛天依','description':'','file':'imaginary.png'})]}
+    payloads=mock_chat(monkeypatch,[wrong,wrong,wrong])
+    with pytest.raises(ValueError,match='未修改项目'):
+        chat('test','deepseek-flash',[],{},asset_query=lambda **kw:{'items':[]})
+    assert len(payloads)==3
+
+
+def test_existing_image_adoption_still_reaches_review(monkeypatch):
+    suggestion={'role':'assistant','tool_calls':[call('add_item',{'kind':'characters','name':'角色','description':'','file':'assets/real.png'})]}
+    mock_chat(monkeypatch,[suggestion])
+    result=chat('test','deepseek-flash',[],{},asset_query=lambda **kw:{'items':[{'file':'assets/real.png','exists':True,'error':''}]})
+    assert result['tool_calls'][0]['function']['name']=='add_item'

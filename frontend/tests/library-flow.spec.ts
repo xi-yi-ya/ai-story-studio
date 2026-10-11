@@ -26,17 +26,55 @@ test('empty pickers guide generation and global entries survive collapsed AI',as
  await page.getByRole('button',{name:'展开 AI 助手',exact:true}).click();
  await page.getByRole('button',{name:'视频库',exact:true}).click();await expect(page.getByText('视频库还没有视频',{exact:true})).toBeVisible();
 });
-test('external-file event imports into the library and dragged images attach and cancel',async()=>{
+test('button attachment works and all drag or legacy file-drop events do nothing',async()=>{
  await page.getByRole('button',{name:'图片库',exact:true}).click();
  const source=path.join(legacy,'assets/b1463e53334345328a91dc047816aec3.png');
- await page.evaluate(source=>{const r=document.querySelector('.media-library')!.getBoundingClientRect();window.dispatchEvent(new CustomEvent('xy-files-dropped',{detail:{paths:[source],x:r.x+20,y:r.y+20}}));},source);
+ await rpc('library.import',{kind:'image',paths:[source]});
+ await page.getByRole('button',{name:'刷新图片库',exact:true}).click();
  await expect(page.locator('.library-card')).toHaveCount(1);
  const result=await rpc('library.query',{kind:'image'}) as any;file=result.items[0].file;
  expect((await state()).project.assets).toHaveLength(0);
- await page.locator('.library-image').dragTo(page.locator('.chat-composer'));
+ await page.getByRole('button',{name:'发送给 AI',exact:true}).click();
  await expect(page.locator('.media-attachment img')).toHaveCount(1);
  expect((await state()).mediaContext.map((m:any)=>m.file)).toEqual([file]);
  await page.getByRole('button',{name:/移除AI素材引用/}).click();expect((await state()).mediaContext).toEqual([]);
+ const prevented=await page.evaluate(source=>{
+  window.dispatchEvent(new CustomEvent('xy-files-dropped',{detail:{paths:[source],x:20,y:20}}));
+  return ['dragstart','dragover','drop'].map(type=>{
+   const event=new DragEvent(type,{bubbles:true,cancelable:true,dataTransfer:new DataTransfer()});
+   document.querySelector('.chat-composer')!.dispatchEvent(event);return event.defaultPrevented;
+  });
+ },source);
+ expect(prevented).toEqual([true,true,true]);
+ expect((await state()).mediaContext).toEqual([]);
+ expect((await rpc('library.query',{kind:'image'}) as any).total).toBe(1);
+ await expect(page.locator('[draggable="true"]')).toHaveCount(0);
+});
+
+test('library deletion is cancellable, persistent, removes AI reference and restores identity',async()=>{
+ const before=(await rpc('library.query',{kind:'image'}) as any).items[0];
+ const bytes=await fs.readFile(path.join(root,file));
+ await page.getByRole('button',{name:'发送给 AI',exact:true}).click();
+ await page.getByRole('button',{name:/删除素材/}).click();
+ await expect(page.getByRole('dialog')).toContainText('不释放磁盘空间');
+ await page.getByRole('button',{name:'保留素材',exact:true}).click();
+ await expect(page.locator('.library-card')).toHaveCount(1);
+ await page.getByRole('button',{name:/删除素材/}).click();
+ await page.getByRole('button',{name:'移入回收站',exact:true}).click();
+ await expect(page.locator('.library-card')).toHaveCount(0);
+ expect((await state()).mediaContext).toEqual([]);
+ expect(await fs.readFile(path.join(root,file))).toEqual(bytes);
+ await rpc('project.new',{path:root+'-reopen',title:'重新打开测试'});await rpc('project.open',{path:root});
+ expect((await rpc('library.query',{kind:'image'}) as any).total).toBe(0);
+ await page.getByRole('button',{name:'图片库',exact:true}).click();
+ await page.getByRole('button',{name:'回收站',exact:true}).click();
+ await expect(page.locator('.library-card')).toHaveCount(1);
+ await page.screenshot({path:`../docs/screenshots/${version}-recycle-bin.png`});
+ await page.getByRole('button',{name:'恢复素材',exact:true}).click();
+ await expect(page.locator('.library-card')).toHaveCount(0);
+ await page.getByRole('button',{name:'返回图片库',exact:true}).click();
+ await expect(page.locator('.library-card')).toHaveCount(1);
+ expect((await rpc('library.query',{kind:'image'}) as any).items[0].id).toBe(before.id);
 });
 test('manual adoption retains names and prevents accidental replacement',async()=>{
  await page.getByRole('button',{name:'角色资产',exact:true}).click();await page.getByRole('button',{name:'添加角色',exact:true}).click();
@@ -47,6 +85,14 @@ test('manual adoption retains names and prevents accidental replacement',async()
  await page.getByRole('button',{name:'选用这张图片',exact:true}).first().click();await page.getByRole('button',{name:'取消添加',exact:true}).click();
  expect((await state()).project.assets[0].imageFile).toBe(file);
  await page.screenshot({path:`../docs/screenshots/${version}-simple-assets.png`});
+});
+
+test('current role image cannot be deleted from the library',async()=>{
+ await page.getByRole('button',{name:'图片库',exact:true}).click();
+ await page.getByRole('button',{name:/删除素材/}).click();
+ await expect(page.getByRole('button',{name:'移入回收站',exact:true})).toBeDisabled();
+ await page.getByRole('button',{name:'保留素材',exact:true}).click();
+ expect((await rpc('library.query',{kind:'image'}) as any).total).toBe(1);
 });
 test('Agent direct video review shows its input and rejects without generating image or shot',async()=>{
  const s=await state();const bundle=path.join(root,'direct-video.json');

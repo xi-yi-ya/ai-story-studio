@@ -516,7 +516,9 @@ Qwen T2I 默认与新批准文件一致：BF16、40 步、16-bit PNG、6.6 MP �
 本版额外真实验证脚本为 `qwen-live.mjs` 与 `asset-query-live.mjs`，分别调用真实 ComfyUI 和 DeepSeek，不属于默认离线测试。素材库测试需要专用项目副本和真实旧结果；最新记录见 [v1.1.0 验收](VALIDATION-v1.1.0.json)。
 
 
-## 13. v1.2.0：素材库优先交互与拖拽的 Java 对照
+## 13. v1.2.0：素材库优先交互的 Java 对照（历史版本）
+
+本章记录 v1.2.0。其中 13.3 的拖拽已按用户要求在 v1.2.1 删除，当前实现见第 14 章，不再存在 `file_drop.py` 和 `mediaDrag.ts`。
 
 ### 13.1 为什么保留 schema 1
 
@@ -562,3 +564,71 @@ Vue 根据落点选择图片库、视频库、AI 附件或生成参考区；Pyth
 空图片库/视频库提示先生成或导入，并提供入口；已有库搜索无结果提示清除筛选。顶部生成入口在 AI 收起后仍可见。资产添加必须先选图再确认；取消不产生资产、版本或任务。
 
 后端语义测试在 `test_library_flow.py`，桌面端交互在 `library-flow.spec.ts`。原 `desktop.spec.ts` 继续验证旧项目、视频播放、任务进度、恢复入口、历史、选中取消、2K/4K 和大量镜头。真实 DeepSeek 与 ComfyUI 验证独立于默认离线测试，见本版验收记录；不能把测试导入建议当作真实 API 验证。
+
+## 14. v1.2.1：操作校验与素材回收站
+
+### 14.1 这次错误发生在哪里
+
+实际记录中，用户要求“生成洛天依三视图”，模型却调用 `add_item` 添加角色、场景，而且没有图片文件。v1.2.0 的添加操作已改为从图片库选用，因而查询空路径失败。这不是用户需要先创建角色，也不是 ComfyUI 生成失败：请求还没有进入生成队列。
+
+`deepseek.py` 现在在返回 UI 前检查整批工具参数：添加角色/场景必须有当前库中的有效图片；生成新图片应调用 `generate`。失败时将“全部未执行”和纠正原因分别回复给本批每个 tool_call_id，再要求模型重新提出操作；最多纠正两次。超限明确报错，不执行半批操作。原始聊天不改写，旧导入建议仍有兼容入口，但不能绕过 Service 的有效文件检查。
+
+Java 对照是 Service 前的 DTO 校验与有限重试，不是将任何 `add_item` 强制改成 `generate`：
+
+```java
+int corrections = 0;
+while (withinReadRoundLimit()) {
+    AssistantMessage suggestion = model.complete(messages);
+    try {
+        validateAllCalls(suggestion.calls());
+        validateExistingMedia(suggestion.calls(), librarySnapshot);
+    } catch (InvalidAction ex) {
+        if (corrections++ >= 2) throw new InvalidAction("无法准备有效操作，项目未修改");
+        messages.add(suggestion);
+        for (ToolCall call : suggestion.calls()) {
+            messages.add(ToolReply.failure(call.id(), "本批均未执行：" + ex.getMessage()));
+        }
+        continue;
+    }
+    // 仍需原有 Skill 读取、提示词检查，再交给用户审阅。
+    return prepareReview(suggestion);
+}
+```
+
+### 14.2 删除与恢复为何不用 File.delete
+
+原文件会被任务记录、版本和再次生成引用。当前删除定义为“移入本项目回收站”，不是清理磁盘。`project.json` 新增可选 `media_trash` 字典，键仍为项目相对路径；值保存名称、类型、时间。`schema=1`、资产 ID 和素材 ID 不变。没有该字段的旧项目按空回收站处理。
+
+```java
+record TrashEntry(String name, String kind, Instant time) {}
+
+void deleteMedia(String file) {
+    requireProjectRelativePath(file);
+    requireNoActiveAgentReview();
+    MediaRecord media = inventory.find(file);
+    requireNotCurrentInCharacterSceneOrShot(file);
+    requireNotReferencedByUnfinishedJob(file);
+    project.mediaTrash().put(file, new TrashEntry(media.name(), media.kind(), Instant.now()));
+    pendingAttachments.removeIf(a -> a.file().equals(file));
+    project.saveAtomically();
+}
+
+void restoreMedia(String file) {
+    requireTrashEntry(file);
+    requireOriginalFileExists(file);
+    project.mediaTrash().remove(file);
+    project.saveAtomically();
+}
+```
+
+普通图库查询、资产选择与 Agent 查询排除回收站；专用 `library.query(trash=true)` 只返回回收站条目。历史仍可查看，原生成参数仍保留；若再次生成需要已删除的参考图，提示先恢复。切换资产历史版本也不能重新选用回收站图片。恢复保留原路径、素材 ID 和原字节。旧版本不识别新字段，回退旧版会重新显示这些文件；这不会丢失文件，但不能用旧版维护回收站状态。
+
+### 14.3 拖拽取消后保留哪些入口
+
+Vue 移除素材 MIME、落点判断、拖入引用等逻辑，文档捕获阶段阻止 dragstart、dragover、drop 的默认行为。Qt WebEngine 禁用接收 drop，删除本地文件事件过滤器。导入按钮、文件选择框、发送给 AI、引用移除以及上移/下移参考图按钮继续使用原后端接口。
+
+### 14.4 测试对应什么证据
+
+`test_agent.py` 通过可控模型回复验证两次纠正上限、整批不执行、真实已有图片仍能进入选用审阅。`test_library_flow.py` 验证删除恢复持久化、当前素材与未完成任务保护、旧任务恢复不能重新采用已删除输出。桌面测试操作真实 Vue + Qt 桥接及测试目录，检查点击、预览、原字节与历史身份；测试夹具中已有的视频输出不等于本轮重新生成视频。
+
+`agent-three-view-live.mjs` 是显式运行的真实 DeepSeek 回归：对原用户项目副本保留旧聊天，发送相同文字；打包版继续以 0.2 MP、实际 40 步完成 Qwen 生图，再从 UI 删除和恢复结果。源码验证只到参数审阅并取消。两个层次分开记录，详见 [v1.2.1 验收](VALIDATION-v1.2.1.json)。

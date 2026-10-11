@@ -341,3 +341,31 @@ test('video library includes generated and imported originals, previews and canc
  await page.getByLabel('视频来源筛选').selectOption('all');await expect(page.locator('.library-card')).toHaveCount(2);
  await page.screenshot({path:`../docs/screenshots/${validationVersion}-video-library.png`});
 });
+
+test('historical generated image and video can be deleted and restored without losing job records',async()=>{
+ const copy=path.resolve('../local-data',`${validationVersion}-historical-delete-${Date.now()}`);
+ const source=path.resolve('../local-data/v110-library-fixture');
+ await fs.cp(source,copy,{recursive:true,filter:p=>!p.endsWith('project.xy-studio.lock')});
+ await rpc('project.open',{path:copy});
+ const prior=await state();
+ for(const kind of ['image','video']){
+  const all=await rpc('library.query',{kind,source:'generated',limit:100}) as any;
+  const record=all.items.find((r:any)=>!r.current) || all.items[0];
+  expect(record).toBeTruthy();
+  for(const owner of record.owners)if(record.current)await rpc('asset.delete',{id:owner.id});
+  const bytes=await fs.readFile(path.join(copy,record.file));
+  await page.getByRole('button',{name:kind==='image'?'图片库':'视频库',exact:true}).click();
+  await page.getByLabel(kind==='image'?'图片来源筛选':'视频来源筛选').selectOption('generated');
+  const card=page.getByTestId('library-'+record.id);await card.waitFor();
+  await card.getByRole('button',{name:/删除素材/}).click();
+  await page.getByRole('button',{name:'移入回收站',exact:true}).click();
+  await expect(card).toHaveCount(0);
+  expect((await rpc('library.query',{kind,limit:100}) as any).items.some((r:any)=>r.file===record.file)).toBe(false);
+  await page.getByRole('button',{name:'回收站',exact:true}).click();
+  await page.getByTestId('library-'+record.id).getByRole('button',{name:'恢复素材',exact:true}).click();
+  await page.getByRole('button',{name:kind==='image'?'返回图片库':'返回视频库',exact:true}).click();
+  expect((await rpc('library.query',{kind,source:'generated',limit:100}) as any).items.find((r:any)=>r.file===record.file).id).toBe(record.id);
+  expect(await fs.readFile(path.join(copy,record.file))).toEqual(bytes);
+ }
+ expect((await state()).project.tasks.map((t:any)=>[t.id,t.raw.outputs])).toEqual(prior.project.tasks.map((t:any)=>[t.id,t.raw.outputs]));
+});

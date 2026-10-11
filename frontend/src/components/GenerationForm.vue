@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { ArrowUp, ArrowDown, Plus, X, RefreshCw } from 'lucide-vue-next';
 import { useStudio } from '../stores/studio';
 import type { Generation } from '../types';
 import MediaLibrary from './MediaLibrary.vue';
 import ReferenceImages from './ReferenceImages.vue';
-import { allowMediaDrop, droppedMedia } from '../mediaDrag';
 const props = defineProps<{ modelValue: Generation; targetId: string }>();
 const emit = defineEmits<{ 'update:modelValue': [g: Generation] }>();
 const store = useStudio(),
@@ -21,20 +20,6 @@ function chooseReference(file: string) {
   if (!props.modelValue.references.includes(file)) props.modelValue.references.push(file);
   choosing.value = false;
 }
-function dropReference(event: DragEvent) {
-  try {
-    const file = droppedMedia(event, store.project.id);
-    if (file) chooseReference(file);
-  } catch (e) {
-    store.notify(String(e));
-  }
-}
-function imported(event: Event) {
-  for (const file of (event as CustomEvent<{ files: string[] }>).detail.files)
-    chooseReference(file);
-}
-onMounted(() => window.addEventListener('xy-references-added', imported));
-onBeforeUnmount(() => window.removeEventListener('xy-references-added', imported));
 const video = computed(() => props.modelValue.mode.startsWith('h3'));
 const modes = computed(() =>
   Object.entries(store.state?.catalog.modes || {}).filter(
@@ -222,13 +207,7 @@ async function importRefs() {
         aria-label="放大倍数"
         required
     /></label>
-    <section
-      v-if="!['qwen', 'krea', 'h3_t2v'].includes(modelValue.mode)"
-      class="reference-picker"
-      data-media-drop="references"
-      @dragover="allowMediaDrop"
-      @drop="dropReference"
-    >
+    <section v-if="!['qwen', 'krea', 'h3_t2v'].includes(modelValue.mode)" class="reference-picker">
       <h3>参考图 · 按顺序引用</h3>
       <ReferenceImages
         :files="modelValue.references"
@@ -237,7 +216,7 @@ async function importRefs() {
         @remove="(i) => modelValue.references.splice(i, 1)"
       />
       <p v-if="!modelValue.references.length" class="reference-empty">
-        请选择参考图片，也可以拖入图片。图生视频需要一张首帧图。
+        请选择或导入参考图片。图生视频需要一张首帧图。
       </p>
       <div class="form-row">
         <select v-model="available" aria-label="选择项目参考图">

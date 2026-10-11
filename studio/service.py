@@ -336,6 +336,8 @@ class StudioService(QObject):
             g.references = []
         g.validate()
         for r in g.references:
+            if r in self.project.data.get('media_trash', {}):
+                raise ValueError('参考图片已移入回收站，请先恢复：'+Path(r).name)
             if not self.project.file(r).is_file():
                 raise ValueError('参考图不存在：'+r)
             if Path(r).suffix.lower() not in IMAGE_SUFFIXES:
@@ -447,6 +449,7 @@ class StudioService(QObject):
                     self._generation(None, asdict(g))
                     pending.update(targetId=LIBRARY_TARGET, targetName='视频库' if g.mode.startswith('h3') else '图片库', generation=self.wire_generation(asdict(g)))
                 elif name == 'add_item' and args['kind'] != 'shots':
+                    if not args.get('file'): raise ValueError('添加角色或场景需要先选择已有图片；生成新图片请使用生图操作')
                     record = AssetLibrary(self.project).get(args.get('file',''))
                     if record['kind'] != 'image': raise ValueError('角色和场景请从图片库选择图片')
                     pending['media'] = {'file':record['file'], 'name':record['name'], 'url':self.media_url(record['file'])}
@@ -565,7 +568,7 @@ class StudioService(QObject):
         if command == 'project.folder':
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(p.root))); return True
         if command == 'library.query':
-            allowed = {'kind', 'query', 'source', 'owner', 'offset', 'limit', 'sort'}
+            allowed = {'kind', 'query', 'source', 'owner', 'offset', 'limit', 'sort', 'trash'}
             if set(a)-allowed: raise ValueError('未知素材查询条件')
             result = AssetLibrary(p).query(**a)
             for r in result['items']:
@@ -577,6 +580,23 @@ class StudioService(QObject):
         if command == 'library.preview':
             r = AssetLibrary(p).get(a['file'])
             return self._version({'id':r['id'], 'file':r['file'], 'kind':r['kind'], 'time':r['time'], 'intent':r['prompt'], 'job':r['jobs'][0] if r['jobs'] else None})
+        if command == 'library.delete':
+            if self.pending or self.batch or 'chat' in self.workers: raise ValueError('请先完成或取消当前 AI 对话与审阅，再删除素材')
+            record = next((r for r in AssetLibrary(p).inventory() if r['file']==a['file']), None)
+            if record is None: raise ValueError('素材已删除或不属于当前项目')
+            current = [item['name'] for kind in ('characters','scenes','shots') for item in p.data[kind] if record['file'] in (item.get('image'),item.get('video'))]
+            if current: raise ValueError('素材正在被使用，请先替换或移除这些条目的图片/视频：'+'、'.join(current))
+            unfinished = {'new','submitting','queued','running','downloading','cancel_requested','unknown','detached'}
+            if any(j.get('status') in unfinished and record['file'] in j.get('generation',{}).get('references',[]) for j in p.data['jobs']):
+                raise ValueError('素材正被未完成的生成任务引用，请先完成或取消任务')
+            p.data.setdefault('media_trash', {})[record['file']] = {'name':record['name'],'kind':record['kind'],'time':now()}
+            self.media_context = [m for m in self.media_context if m['file']!=record['file']]
+            self.save(); return True
+        if command == 'library.restore':
+            if a['file'] not in p.data.get('media_trash', {}): raise ValueError('回收站中没有这份素材')
+            if not p.file(a['file']).is_file(): raise ValueError('原文件缺失，无法恢复，请检查项目文件夹')
+            del p.data['media_trash'][a['file']]
+            self.save(); return True
         if command == 'references.describe':
             files = a['files']
             if not isinstance(files,list) or len(files)>16 or any(not isinstance(f,str) for f in files): raise ValueError('参考素材列表无效')
@@ -585,8 +605,9 @@ class StudioService(QObject):
             for file in files:
                 original = p.file(file)
                 r = records.get(file)
-                exists = original.is_file() and original.suffix.lower() in IMAGE_SUFFIXES
-                result.append({'file':file,'name':r['name'] if r else original.name,'media':self.media_url(file) if exists else '', 'exists':exists})
+                trashed = file in p.data.get('media_trash', {})
+                exists = original.is_file() and original.suffix.lower() in IMAGE_SUFFIXES and not trashed
+                result.append({'file':file,'name':r['name'] if r else original.name,'media':self.media_url(file) if exists else '', 'exists':exists,'trashed':trashed})
             return result
         if command == 'library.import':
             kind = a['kind']
@@ -688,6 +709,7 @@ class StudioService(QObject):
             if not v and a['version'] in ('current-'+item['id']+'-image', 'current-'+item['id']+'-video'):
                 return True
             if not v: raise ValueError('该版本不存在')
+            if v['file'] in p.data.get('media_trash', {}): raise ValueError('该版本已移入回收站，请先在素材库恢复')
             if not p.file(v['file']).is_file(): raise ValueError('版本文件不存在')
             item[v['kind']] = v['file']; p.mark_dependents(item['id']); self.save(); return True
         if command == 'media.open':

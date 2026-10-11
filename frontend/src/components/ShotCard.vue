@@ -27,7 +27,6 @@ import { useStudio } from '../stores/studio';
 import MediaThumb from './MediaThumb.vue';
 import VideoPreview from './VideoPreview.vue';
 import TaskProgress from './TaskProgress.vue';
-import { dragMedia } from '../mediaDrag';
 const props = defineProps<{ shot: Shot; index: number }>();
 const emit = defineEmits<{
   edit: [id: string];
@@ -204,8 +203,6 @@ function previewImage() {
           :aria-pressed="store.selectedId === shot.id"
           @click.stop="store.toggleSelection(shot.id)"
           @dblclick.stop="previewImage"
-          :draggable="!!currentImage"
-          @dragstart="dragMedia($event, currentImage?.file, store.project.id)"
         >
           <MediaThumb :media="currentImage?.media" label="双击查看分镜大图" />
         </button>

@@ -34,7 +34,7 @@ class AssetLibrary:
     def __init__(self, project):
         self.project = project
 
-    def inventory(self):
+    def inventory(self, include_trash=False):
         p, records = self.project, {}
         items = {item['id']: (kind, item) for kind in ('characters', 'scenes', 'shots') for item in p.data[kind]}
         def entry(relative):
@@ -48,6 +48,7 @@ class AssetLibrary:
             kind = 'image' if file.suffix.lower() in IMAGE_SUFFIXES else 'video' if file.suffix.lower() in VIDEO_SUFFIXES else None
             if not kind or relative.startswith('previews/'):
                 return None
+            if not include_trash and relative in p.data.get('media_trash', {}): return None
             if relative not in records:
                 try: exists = file.is_file(); stat = file.stat() if exists else None
                 except OSError: exists = False; stat = None
@@ -101,6 +102,8 @@ class AssetLibrary:
                 dirs[:] = [d for d in dirs if not (Path(folder)/d).is_symlink() and not os.path.isjunction(Path(folder)/d)]
                 for name in sorted(files):
                     entry((Path(folder)/name).relative_to(p.root).as_posix())
+        if include_trash:
+            for relative in p.data.get('media_trash', {}): entry(relative)
         counts = {}
         for r in sorted(records.values(), key=lambda r:r['file']):
             if r['file'] in p.data.get('media_names', {}):
@@ -110,14 +113,15 @@ class AssetLibrary:
                 r['name'] = label+' '+str(counts[label])
         return list(records.values())
 
-    def query(self, kind, query='', source='all', owner='all', offset=0, limit=24, sort='newest'):
+    def query(self, kind, query='', source='all', owner='all', offset=0, limit=24, sort='newest', trash=False):
+        if type(trash) is not bool: raise ValueError('回收站查询条件无效')
         if kind not in ('image', 'video') or source not in SOURCES or owner not in OWNERS or sort not in ('newest', 'oldest', 'name'):
             raise ValueError('素材查询条件无效')
         if not isinstance(query, str) or len(query) > 1000:
             raise ValueError('搜索文字过长或格式无效')
         if type(offset) is not int or type(limit) is not int or offset < 0 or not 1 <= limit <= 100:
             raise ValueError('素材分页范围无效')
-        all_records = [r for r in self.inventory() if r['kind'] == kind]
+        all_records = [r for r in self.inventory(include_trash=trash) if r['kind'] == kind and (not trash or r['file'] in self.project.data.get('media_trash', {}))]
         stats = {s: sum(r['source'] == s for r in all_records) for s in ('imported', 'generated', 'project')}
         stats.update(all=len(all_records), missing=sum(not r['exists'] for r in all_records))
         needle = query.strip().casefold()
@@ -139,6 +143,8 @@ class AssetLibrary:
         return {'kind': kind, 'total': len(matches), 'offset': offset, 'limit': limit, 'hasMore': offset+limit < len(matches), 'stats': stats, 'items': page}
 
     def get(self, relative):
+        if relative in self.project.data.get('media_trash', {}):
+            raise ValueError('该素材已移入回收站，请先在素材库恢复')
         record = next((r for r in self.inventory() if r['file'] == relative), None)
         if not record or not record['exists']:
             raise ValueError('该素材不存在或不属于当前项目素材库')

@@ -101,6 +101,7 @@ class Project:
         self.save()
 
     def attach_output(self,job,relative):
+        if relative in self.data.get('media_trash', {}): return
         # New requests belong to the library. Legacy jobs retain their original
         # associations during replay so opening old projects remains lossless.
         if job.get('target') == LIBRARY_TARGET or job.get('library_only'): return

@@ -3,15 +3,13 @@ import json
 from dataclasses import asdict
 import pytest
 from PIL import Image
-from PySide6.QtCore import QSettings, QMimeData, QUrl, Qt, QPointF
-from PySide6.QtGui import QDropEvent
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication
 from studio import service as module
 from studio.service import StudioService
 from studio.storage import LIBRARY_TARGET, atomic_json, Project
 from studio.workflows import Generation
 from studio.asset_library import AssetLibrary
-from studio.file_drop import NativeFileDrop
 
 app=QApplication.instance() or QApplication([])
 @pytest.fixture
@@ -98,22 +96,46 @@ def test_legacy_pending_resume_preserves_ids_but_requires_adoption(service,tmp_p
  assert not AssetLibrary(s.project).get(out)['owners']
  assert Project(s.project.root).data['jobs'][-1]['library_only']
 
-def test_native_file_drop_passes_original_paths_and_zoom_coordinates_without_navigation():
- class Page:
-  def __init__(self):self.scripts=[]
-  def runJavaScript(self,script):self.scripts.append(script)
- class View(QWidget):
-  def __init__(self):super().__init__();self.browser=Page()
-  def page(self):return self.browser
-  def zoomFactor(self):return 1.25
- view=View();filter=NativeFileDrop(view);mime=QMimeData()
- mime.setUrls([QUrl.fromLocalFile('D:/素材/人物.png'),QUrl.fromLocalFile('D:/素材/视频.mp4')])
- event=QDropEvent(QPointF(125,250),Qt.CopyAction,mime,Qt.LeftButton,Qt.NoModifier)
- assert filter.eventFilter(view,event) and event.isAccepted()
- script=view.browser.scripts[-1]
- wire=script.split('detail:',1)[1].split('}));',1)[0]
- data=json.loads(wire)
- assert data['paths']==['D:/素材/人物.png','D:/素材/视频.mp4'] and data['x']==100 and data['y']==200
- mime.setUrls([QUrl('https://example.com/image.png')])
- assert not filter.eventFilter(view,QDropEvent(QPointF(0,0),Qt.CopyAction,mime,Qt.LeftButton,Qt.NoModifier))
- view.deleteLater()
+def test_library_delete_restore_persists_without_losing_history_or_original(service,tmp_path):
+ s=service;file=image(s,tmp_path,'生成结果')
+ job={'id':'completed','target':LIBRARY_TARGET,'status':'completed','generation':asdict(Generation(prompt='角色三视图')),'outputs':[file]}
+ s.project.data['jobs'].append(job);s.project.save()
+ identity=AssetLibrary(s.project).get(file)['id'];original=s.project.file(file).read_bytes()
+ s.dispatch('context.add_media',{'file':file})
+ s.dispatch('library.delete',{'file':file})
+ assert not s.media_context and AssetLibrary(s.project).query('image')['total']==0
+ assert AssetLibrary(s.project).query('image',trash=True)['items'][0]['id']==identity
+ assert s.project.file(file).read_bytes()==original and job['outputs']==[file]
+ assert s.dispatch('references.describe',{'files':[file]})[0]['trashed']
+ root=s.project.root;s.load(tmp_path/'other',create=True);s.load(root)
+ assert AssetLibrary(s.project).query('image')['total']==0
+ with pytest.raises(ValueError,match='回收站'):s.dispatch('context.add_media',{'file':file})
+ with pytest.raises(ValueError,match='回收站'):s.dispatch('generation.submit',{'generation':asdict(Generation(mode='qwen_edit',prompt='edit',references=[file]))})
+ s.dispatch('library.restore',{'file':file})
+ assert AssetLibrary(s.project).get(file)['id']==identity
+ assert AssetLibrary(s.project).query('image',trash=True)['total']==0
+ assert s.project.data['jobs'][0]['outputs']==[file]
+
+def test_delete_protects_selected_assets_pending_inputs_and_paths(service,tmp_path):
+ s=service;file=image(s,tmp_path)
+ actor=s.dispatch('asset.from_media',{'kind':'characters','file':file})
+ with pytest.raises(ValueError,match='正在被使用'):s.dispatch('library.delete',{'file':file})
+ s.dispatch('asset.delete',{'id':actor})
+ job=s.dispatch('generation.submit',{'generation':asdict(Generation(mode='qwen_edit',prompt='edit',references=[file]))})
+ with pytest.raises(ValueError,match='未完成'):s.dispatch('library.delete',{'file':file})
+ s.dispatch('task.cancel',{'id':job})
+ with pytest.raises(ValueError):s.dispatch('library.delete',{'file':'../outside.png'})
+ s.dispatch('library.delete',{'file':file})
+ assert s.project.file(file).is_file()
+
+def test_deleted_legacy_output_is_not_readopted_during_replay(service,tmp_path):
+ s=service;file=image(s,tmp_path)
+ actor=s.project.add('characters','旧角色')
+ job={'id':'legacy','target':actor['id'],'status':'completed','generation':asdict(Generation()),'outputs':[file]}
+ s.project.data['jobs'].append(job);s.project.save()
+ s.dispatch('library.delete',{'file':file})
+ s.project.attach_output(job,file)
+ assert not actor['image'] and not actor['versions']
+ assert not AssetLibrary(s.project).query('image')['total']
+ actor['versions'].append({'id':'old-version','file':file,'kind':'image'})
+ with pytest.raises(ValueError,match='回收站'):s.dispatch('version.use',{'id':actor['id'],'version':'old-version'})

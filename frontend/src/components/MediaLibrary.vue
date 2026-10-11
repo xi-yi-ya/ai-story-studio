@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, watch, onBeforeUnmount } from 'vue';
 import {
   Search,
   RefreshCw,
@@ -10,13 +10,14 @@ import {
   Send,
   ExternalLink,
   Focus,
+  Trash2,
+  RotateCcw,
 } from 'lucide-vue-next';
 import type { LibraryAsset, LibraryResult, Version, Generation } from '../types';
 import { useStudio } from '../stores/studio';
 import MediaThumb from './MediaThumb.vue';
 import MessageText from './MessageText.vue';
 import StudioDialog from './StudioDialog.vue';
-import { dragMedia, allowMediaDrop } from '../mediaDrag';
 import ReferenceImages from './ReferenceImages.vue';
 import GenerationDetails from './GenerationDetails.vue';
 const props = defineProps<{
@@ -43,6 +44,40 @@ const result = ref<LibraryResult>(),
   detail = ref<LibraryAsset | null>(null),
   detailGeneration = ref<Generation>();
 const size = computed(() => (props.chooseOnly ? 12 : 24));
+const trash = ref(false),
+  deleting = ref<LibraryAsset | null>(null),
+  deletingBusy = ref(false),
+  deleteError = ref('');
+function toggleTrash() {
+  trash.value = !trash.value;
+  query.value = '';
+  source.value = 'all';
+  owner.value = 'all';
+}
+function askDelete(item: LibraryAsset) {
+  deleting.value = item;
+  deleteError.value = '';
+}
+async function deleteMedia() {
+  if (!deleting.value || deletingBusy.value) return;
+  deletingBusy.value = true;
+  try {
+    await store.api('library.delete', { file: deleting.value.file });
+    deleting.value = null;
+    detail.value = null;
+    await load();
+    store.notify('素材已移入回收站，可以恢复；历史记录保留');
+  } catch (e) {
+    deleteError.value = String(e);
+  } finally {
+    deletingBusy.value = false;
+  }
+}
+async function restore(item: LibraryAsset) {
+  await store.api('library.restore', { file: item.file });
+  await load();
+  store.notify('素材已恢复到' + labels.value + '库');
+}
 const sourceNames: Record<string, string> = {
   imported: '导入素材',
   generated: '生成素材',
@@ -63,6 +98,7 @@ async function load() {
       sort: sort.value,
       offset: offset.value,
       limit: size.value,
+      trash: trash.value,
     });
     if (version !== serial) return;
     if (data.total && offset.value >= data.total) {
@@ -85,7 +121,7 @@ async function importMedia() {
   refresh();
 }
 watch(
-  [query, source, owner, sort, () => props.kind, () => store.project.id],
+  [query, source, owner, sort, trash, () => props.kind, () => store.project.id],
   () => {
     offset.value = 0;
     detail.value = null;
@@ -103,11 +139,9 @@ watch(
     timer = setTimeout(load, 160);
   },
 );
-onMounted(() => window.addEventListener('xy-library-imported', refresh));
 onBeforeUnmount(() => {
   serial++;
   clearTimeout(timer);
-  window.removeEventListener('xy-library-imported', refresh);
 });
 async function preview(item: LibraryAsset) {
   emit('preview', await store.previewMedia(item.file));
@@ -168,19 +202,18 @@ async function derive(item: LibraryAsset, video = false) {
     class="media-library"
     :class="{ 'choose-library': chooseOnly }"
     :aria-label="`${labels}素材库`"
-    :data-media-drop="kind === 'image' ? 'images' : 'videos'"
-    @dragover="allowMediaDrop"
   >
     <div class="library-intro surface" v-if="!chooseOnly">
       <div>
-        <strong>全部{{ labels }} · {{ result?.stats.all || 0 }}</strong
+        <strong
+          >{{ trash ? '回收站 · ' : '全部' }}{{ labels }} · {{ result?.stats.all || 0 }}</strong
         ><span
           >生成 {{ result?.stats.generated || 0 }} · 导入 {{ result?.stats.imported || 0 }} · 其他
           {{ result?.stats.project || 0 }}</span
         >
       </div>
       <p>
-        生成和导入的素材统一保存在这里。预览满意后，再添加到角色、场景或分镜。也可以拖入本机图片或视频。
+        生成和导入的素材统一保存在这里。预览满意后，再添加到角色、场景或分镜。使用“导入”按钮添加本机图片或视频。
       </p>
     </div>
     <div class="library-filters">
@@ -212,8 +245,11 @@ async function derive(item: LibraryAsset, video = false) {
       <button class="btn" :disabled="loading" :aria-label="`刷新${labels}库`" @click="refresh">
         <RefreshCw :size="14" />刷新
       </button>
-      <button class="btn" :aria-label="`导入${labels}到素材库`" @click="importMedia">
+      <button v-if="!trash" class="btn" :aria-label="`导入${labels}到素材库`" @click="importMedia">
         导入{{ labels }}
+      </button>
+      <button v-if="!chooseOnly" class="btn" @click="toggleTrash">
+        <Trash2 :size="14" />{{ trash ? `返回${labels}库` : '回收站' }}
       </button>
     </div>
     <p v-if="loading" class="library-feedback">正在查询{{ labels }}资产…</p>
@@ -222,16 +258,26 @@ async function derive(item: LibraryAsset, video = false) {
     </div>
     <div v-if="result && !result.total && !loading" class="empty-state surface">
       <Image v-if="kind === 'image'" :size="32" /><Film v-else :size="32" />
-      <h3>{{ result.stats.all ? `没有找到匹配的${labels}` : `${labels}库还没有${labels}` }}</h3>
+      <h3>
+        {{
+          result.stats.all
+            ? `没有找到匹配的${labels}`
+            : trash
+              ? `回收站暂无${labels}`
+              : `${labels}库还没有${labels}`
+        }}
+      </h3>
       <p>
         {{
           result.stats.all
             ? '试试其他关键词或清除筛选条件。'
-            : `请先生成或导入${labels}，再选择添加。`
+            : trash
+              ? '删除的素材会出现在这里，可恢复到素材库。'
+              : `请先生成或导入${labels}，再选择添加。`
         }}
       </p>
       <button
-        v-if="!result.stats.all"
+        v-if="!result.stats.all && !trash"
         type="button"
         class="btn btn-primary"
         @click="emit('generate', kind)"
@@ -259,9 +305,7 @@ async function derive(item: LibraryAsset, video = false) {
       >
         <button
           class="library-image"
-          :draggable="item.exists"
-          @dragstart="dragMedia($event, item.file, store.project.id)"
-          :disabled="!item.exists || !!item.error"
+          :disabled="trash || !item.exists || !!item.error"
           :aria-label="`${chooseOnly ? '选用' : '查看'}${item.name}`"
           @click="chooseOnly ? choose(item) : preview(item)"
         >
@@ -288,7 +332,12 @@ async function derive(item: LibraryAsset, video = false) {
           <p v-if="item.error" class="danger">{{ item.error }}</p>
           <p v-else>{{ date(item.time) }}</p>
         </div>
-        <footer v-if="chooseOnly">
+        <footer v-if="trash">
+          <button class="btn" :disabled="!item.exists" @click="restore(item)">
+            <RotateCcw :size="13" />恢复素材
+          </button>
+        </footer>
+        <footer v-else-if="chooseOnly">
           <button class="btn" :disabled="!item.exists || !!item.error" @click="choose(item)">
             选用这{{ kind === 'image' ? '张图片' : '段视频' }}</button
           ><button
@@ -309,8 +358,20 @@ async function derive(item: LibraryAsset, video = false) {
           >
             选用素材</button
           ><button class="text-action" @click="details(item)">查看记录</button
-          ><button class="text-action" :disabled="!item.exists || !!item.error" @click="store.pinMedia(item.file)">
+          ><button
+            class="text-action"
+            :disabled="!item.exists || !!item.error"
+            @click="store.pinMedia(item.file)"
+          >
             <Send :size="12" />发送给 AI
+          </button>
+          <button
+            type="button"
+            class="text-action danger"
+            :aria-label="`删除素材 ${item.name}`"
+            @click="askDelete(item)"
+          >
+            <Trash2 :size="12" />删除
           </button>
         </footer>
       </article>
@@ -340,6 +401,28 @@ async function derive(item: LibraryAsset, video = false) {
       </div>
     </div>
   </section>
+  <StudioDialog
+    :open="!!deleting"
+    @update:open="(v) => !v && !deletingBusy && (deleting = null)"
+    title="删除素材"
+    description="移入项目回收站，原文件与历史记录保留，可恢复。此操作不释放磁盘空间。"
+  >
+    <p>将「{{ deleting?.name }}」移入回收站？</p>
+    <p v-if="deleting?.current" class="danger">
+      这份素材正在被角色、场景或分镜使用，请先替换或移除对应条目的图片/视频。
+    </p>
+    <p v-if="deleteError" class="danger" role="alert">{{ deleteError }}</p>
+    <footer class="dialog-actions">
+      <button class="btn" :disabled="deletingBusy" @click="deleting = null">保留素材</button
+      ><button
+        class="btn btn-primary"
+        :disabled="deletingBusy || deleting?.current"
+        @click="deleteMedia"
+      >
+        移入回收站
+      </button>
+    </footer>
+  </StudioDialog>
   <StudioDialog
     :open="!!detail"
     @update:open="(v) => !v && (detail = null)"

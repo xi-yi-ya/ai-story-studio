@@ -25,7 +25,6 @@ import {
 import type { Asset } from '../types';
 import { useStudio } from '../stores/studio';
 import MediaThumb from './MediaThumb.vue';
-import { dragMedia } from '../mediaDrag';
 const props = defineProps<{ asset: Asset }>();
 const emit = defineEmits<{
   edit: [id: string];
@@ -82,8 +81,6 @@ function act(action: string) {
           :aria-pressed="store.selectedId === asset.id"
           @click.stop="store.toggleSelection(asset.id)"
           @dblclick.stop="preview"
-          :draggable="!!current"
-          @dragstart="dragMedia($event, current?.file, store.project.id)"
         >
           <MediaThumb :media="current?.media" :label="asset.name" /><span
             v-if="store.selectedId === asset.id"

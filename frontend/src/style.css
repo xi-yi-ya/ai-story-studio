@@ -12,7 +12,6 @@
 .form-label {display:flex;flex-direction:column;gap:8px;margin-top:12px;}
 .library-derive {display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;}
 .library-card.selected {border-color:#526de0;box-shadow:0 0 0 2px #e5eaff;}
-.drop-active {outline:2px dashed #526de0;outline-offset:-5px;background-color:#f3f6ff!important;}
 .context-pins .media-attachment {display:flex;max-width:100%;align-items:center;gap:8px;border-radius:9px;}
 .context-pins .media-attachment .media-thumb {width:48px;height:44px;flex-shrink:0;border-radius:5px;overflow:hidden;}
 .top-generate {flex-shrink:0;}
@@ -2609,3 +2608,6 @@ h3 {
 .choose-library .library-image { height:100px; }
 .choose-library .library-filters { gap:6px; }
 @media (max-width:1100px) { .library-grid { grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); } .library-pagination { flex-wrap:wrap; } }
+
+/* Native and internal media dragging are intentionally disabled. */
+img, video { -webkit-user-drag: none; }

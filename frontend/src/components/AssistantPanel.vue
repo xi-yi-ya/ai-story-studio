@@ -13,7 +13,6 @@ import {
   ChevronDown,
 } from 'lucide-vue-next';
 import MediaThumb from './MediaThumb.vue';
-import { allowMediaDrop, droppedMedia } from '../mediaDrag';
 import MessageText from './MessageText.vue';
 import ChatSources from './ChatSources.vue';
 import { useStudio } from '../stores/studio';
@@ -49,14 +48,6 @@ async function send() {
 }
 watch(() => store.project.chat.length, bottom);
 watch(() => store.project.id, bottom);
-async function dropImage(event: DragEvent) {
-  try {
-    const file = droppedMedia(event, store.project.id);
-    if (file) await store.pinMedia(file);
-  } catch (e) {
-    store.notify(String(e));
-  }
-}
 function jumpTo() {
   document
     .getElementById(`chat-${jump.value}`)
@@ -64,13 +55,7 @@ function jumpTo() {
 }
 </script>
 <template>
-  <aside
-    class="assistant-panel"
-    aria-label="AI 助手"
-    data-media-drop="assistant"
-    @dragover="allowMediaDrop"
-    @drop="dropImage"
-  >
+  <aside class="assistant-panel" aria-label="AI 助手">
     <header class="assistant-header">
       <div class="flex items-center gap-2.5">
         <span class="assistant-spark"><Sparkles :size="18" /></span>
@@ -231,7 +216,7 @@ function jumpTo() {
       <textarea
         v-model="draft"
         aria-label="给 AI 助手的消息"
-        placeholder="描述你的创作想法，或拖入图片作为参考…"
+        placeholder="描述你的创作想法；可从素材库发送图片作为参考…"
         rows="3"
         @keydown.ctrl.enter.prevent="send"
       />
