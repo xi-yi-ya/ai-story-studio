@@ -4,8 +4,8 @@
 
 ## 下载什么
 
-- [Windows 桌面版](https://github.com/xi-yi-ya/ai-story-studio/releases/latest)：选择 Assets 中的 `XY-Studio-v1.2.1-Windows.zip`。Source code 是给开发者使用的源码。
-- [ComfyUI 配套环境（夸克网盘，分享名「comfui」）](https://pan.quark.cn/s/050569c33d82)。
+- **推荐：[夸克网盘：XY Studio＋ComfyUI](https://pan.quark.cn/s/050569c33d82)**。作者已将 XY Studio 完整压缩包放进同一个分享，选择 `XY-Studio-v1.2.1-Windows.zip` 和 ComfyUI 配套环境下载。分享名称仍为「comfui」。
+- [GitHub Releases 备用下载](https://github.com/xi-yi-ya/ai-story-studio/releases/latest)：也可在 Assets 中下载同一 Windows 程序包；不包含 ComfyUI。Source code 是给开发者使用的源码。
 
 两个压缩包分别完整解压到可写目录。XY Studio 已包含运行环境，不用另装 Python、Node.js 或前端依赖；ComfyUI 负责模型运算，需要与其要求匹配的显卡、驱动和可用内存/显存。模型与插件不打进 XY Studio 的 ZIP。
 

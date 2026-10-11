@@ -6,12 +6,12 @@
 
 ## 直接下载使用（Windows）
 
-无需安装 Python、Node.js 或编译源码。下载下面两个包并分别完整解压：
+无需安装 Python、Node.js 或编译源码。**推荐从同一个夸克分享下载 XY Studio 完整压缩包和 ComfyUI 配套环境**，然后分别完整解压：
 
 | 下载 | 用途 |
 | --- | --- |
-| [XY Studio Windows 桌面版](https://github.com/xi-yi-ya/ai-story-studio/releases/latest) | 在 Assets 中选择 `XY-Studio-v1.2.1-Windows.zip`，不要选自动生成的 Source code |
-| [作者提供的 ComfyUI 配套包（夸克网盘）](https://pan.quark.cn/s/050569c33d82) | 本地图像与视频生成环境；分享名称为「comfui」 |
+| [夸克网盘：XY Studio＋ComfyUI（推荐）](https://pan.quark.cn/s/050569c33d82) | 同一个分享内获取 `XY-Studio-v1.2.1-Windows.zip` 和 ComfyUI 配套环境；分享名称仍为「comfui」 |
+| [GitHub Releases：XY Studio 备用下载](https://github.com/xi-yi-ya/ai-story-studio/releases/latest) | 在 Assets 中选择 `XY-Studio-v1.2.1-Windows.zip`；仅含 Studio，不含 ComfyUI。不要选自动生成的 Source code |
 
 1. 先用 ComfyUI 包内启动器启动服务，等待浏览器能够打开 `http://127.0.0.1:8188`。
 2. 打开 XY Studio 包里的 `XY-Studio/XY-Studio.exe`，新建项目或打开已有项目。
